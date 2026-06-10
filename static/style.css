@@ -1,0 +1,149 @@
+body {
+  margin: 0;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  background: linear-gradient(135deg, #f6fbff, #ebf4ff);
+  color: #111827;
+}
+
+.wrap {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 24px 16px 40px;
+}
+
+.card {
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid #dbe4ee;
+  border-radius: 14px;
+  box-shadow: 0 14px 32px rgba(15, 23, 42, 0.08);
+}
+
+.hero {
+  display: grid;
+  grid-template-columns: 1.2fr 0.8fr;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.panel-main,
+.panel-side,
+.list {
+  padding: 20px;
+}
+
+.tag {
+  display: inline-block;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: #dff6f1;
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+h1 {
+  margin: 14px 0 10px;
+  font-size: 34px;
+  line-height: 1.1;
+}
+
+p {
+  margin: 0;
+  color: #5b6475;
+  line-height: 1.6;
+}
+
+.num-label {
+  color: #5b6475;
+  font-size: 13px;
+}
+
+.num {
+  margin: 10px 0 14px;
+  font-size: 64px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.updated {
+  color: #5b6475;
+  font-size: 13px;
+}
+
+.head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+  margin-bottom: 14px;
+}
+
+.head h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.head span {
+  color: #5b6475;
+  font-size: 13px;
+}
+
+.table-box {
+  overflow: auto;
+  border: 1px solid #dbe4ee;
+  border-radius: 12px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 620px;
+  background: #fff;
+}
+
+th,
+td {
+  padding: 12px 14px;
+  text-align: left;
+  border-bottom: 1px solid #e5edf6;
+  font-size: 14px;
+}
+
+th {
+  background: #f8fbfe;
+}
+
+tr:last-child td {
+  border-bottom: 0;
+}
+
+.badge {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #dff6f1;
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.empty {
+  padding: 24px;
+  text-align: center;
+  color: #5b6475;
+  background: #fff;
+}
+
+@media (max-width: 760px) {
+  .hero {
+    grid-template-columns: 1fr;
+  }
+
+  h1 {
+    font-size: 28px;
+  }
+
+  .num {
+    font-size: 52px;
+  }
+}

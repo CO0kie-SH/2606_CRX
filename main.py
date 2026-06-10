@@ -1,16 +1,29 @@
-# 这是一个示例 Python 脚本。
-
-# 按 Shift+F10 执行或将其替换为您的代码。
-# 按 双击 Shift 在所有地方搜索类、文件、工具窗口、操作和设置。
-
-
-def print_hi(name):
-    # 在下面的代码行中使用断点来调试脚本。
-    print(f'Hi, {name}')  # 按 Ctrl+F8 切换断点。
+import logging
+import os
+import sys
+from pathlib import Path
 
 
-# 按装订区域中的绿色按钮以运行脚本。
-if __name__ == '__main__':
-    print_hi('PyCharm')
+LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 
-# 访问 https://www.jetbrains.com/help/pycharm/ 获取 PyCharm 帮助
+
+def init_logging(level: int = logging.INFO) -> logging.Logger:
+    logging.basicConfig(level=level, format=LOG_FORMAT, force=True)
+    logger = logging.getLogger("ctf_dashboard")
+    logger.info("Logger initialized.")
+    logger.info("Current working directory: %s", os.getcwd())
+    logger.info("Interpreter directory: %s", Path(sys.executable).parent)
+    logger.info("Interpreter executable: %s", sys.executable)
+    return logger
+
+
+if __name__ == "__main__":
+    logger = init_logging()
+    try:
+        from server.runner import run
+
+        logger.info("Imported server.runner successfully.")
+        run()
+    except Exception:
+        logger.exception("Application startup failed.")
+        raise

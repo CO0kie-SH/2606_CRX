@@ -62,7 +62,6 @@
 ```text
 m202604.crx/
 ├── README.md
-├── README2.md                  # 参考说明文档格式
 └── chrome-extension/
     ├── manifest.json           # Chrome 扩展配置
     ├── background.js           # 后台 service worker，负责捕获导航和输出日志
@@ -74,7 +73,6 @@ m202604.crx/
 说明：
 
 - 真正需要加载到 Chrome 的目录是 `chrome-extension/`。
-- `README2.md` 只是格式参考，不属于扩展运行文件。
 - 修改 `manifest.json` 后必须在 `chrome://extensions/` 手动刷新扩展。
 
 ---
@@ -344,7 +342,7 @@ Get-Content -Raw .\chrome-extension\manifest.json | ConvertFrom-Json | Out-Null
 
 本次会话主要变更集中在：
 
-- `README.md`：按照 `README2.md` 的说明风格重写项目文档
+- `README.md`：项目说明文档
 - `chrome-extension/manifest.json`：版本为 `1.1.0`，包含导航捕获所需权限
 - `chrome-extension/background.js`：负责后台日志、导航捕获、版本输出
 - `chrome-extension/content.js`：负责页面浮窗、开关、日志框和页面内 URL 变化记录
