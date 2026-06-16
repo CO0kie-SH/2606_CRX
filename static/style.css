@@ -27,7 +27,8 @@ body {
 
 .panel-main,
 .panel-side,
-.list {
+.list,
+.tools {
   padding: 20px;
 }
 
@@ -94,6 +95,119 @@ p {
   border-radius: 12px;
 }
 
+.tools {
+  margin-top: 16px;
+  background:
+    radial-gradient(circle at top right, rgba(15, 118, 110, 0.09), transparent 38%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.97), rgba(247, 251, 255, 0.97));
+}
+
+.tools-head {
+  align-items: center;
+}
+
+.tools-copy {
+  margin-bottom: 18px;
+}
+
+.tool-button {
+  border: 0;
+  border-radius: 999px;
+  padding: 12px 18px;
+  background: linear-gradient(135deg, #0f766e, #0891b2);
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 12px 24px rgba(8, 145, 178, 0.24);
+  transition: transform 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease;
+}
+
+.tool-button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 16px 28px rgba(8, 145, 178, 0.28);
+}
+
+.tool-button:active {
+  transform: translateY(0);
+}
+
+.tool-viewer {
+  border: 1px solid #dbe4ee;
+  border-radius: 16px;
+  overflow: hidden;
+  background: #08111f;
+}
+
+.tool-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  background: rgba(148, 163, 184, 0.12);
+  color: #dbeafe;
+  font-size: 13px;
+}
+
+.tool-meta span:last-child {
+  color: #94a3b8;
+  text-align: right;
+}
+
+.tool-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  padding: 16px;
+}
+
+.tool-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.tool-field-wide {
+  grid-column: 1 / -1;
+}
+
+.tool-label {
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.tool-value {
+  color: #f8fafc;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.tool-notes {
+  padding: 0 16px 18px;
+}
+
+.tool-note-list {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  color: #dbeafe;
+  line-height: 1.7;
+}
+
+.tool-button:disabled {
+  opacity: 0.72;
+  cursor: wait;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -145,5 +259,20 @@ tr:last-child td {
 
   .num {
     font-size: 52px;
+  }
+
+  .tools-head,
+  .tool-meta {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .tool-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .tool-button {
+    width: 100%;
+    justify-content: center;
   }
 }

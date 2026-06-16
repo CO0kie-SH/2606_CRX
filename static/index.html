@@ -28,6 +28,61 @@
       </div>
       <div class="table-box" id="table-box"></div>
     </section>
+
+    <section class="card tools">
+      <div class="head tools-head">
+        <div>
+          <div class="tag">Function Panel</div>
+          <h2>Visa 题目生成</h2>
+        </div>
+        <button class="tool-button" id="visa-tool-generate" type="button">生成 Visa 题目</button>
+      </div>
+      <p class="tools-copy">点击按钮后，页面会根据 `visa_card_gen.py` 动态生成一组 Visa 测试卡数据，并作为当前题目展示。</p>
+      <div class="tool-viewer" id="visa-tool-viewer">
+        <div class="tool-meta">
+          <span id="visa-tool-name">Visa 题目</span>
+          <span id="visa-tool-path">点击右上角按钮生成</span>
+        </div>
+        <div class="tool-notes">
+          <div class="tool-label">题目说明</div>
+          <ul class="tool-note-list" id="visa-tool-prompt">
+            <li>尚未生成题目。</li>
+          </ul>
+        </div>
+        <div class="tool-grid">
+          <div class="tool-field">
+            <span class="tool-label">challenge_id</span>
+            <code class="tool-value" id="visa-tool-challenge-id">--</code>
+          </div>
+          <div class="tool-field">
+            <span class="tool-label">number</span>
+            <code class="tool-value" id="visa-tool-number">--</code>
+          </div>
+          <div class="tool-field">
+            <span class="tool-label">expiry</span>
+            <code class="tool-value" id="visa-tool-expiry">--</code>
+          </div>
+          <div class="tool-field">
+            <span class="tool-label">cvv</span>
+            <code class="tool-value" id="visa-tool-cvv">--</code>
+          </div>
+          <div class="tool-field tool-field-wide">
+            <span class="tool-label">mode</span>
+            <code class="tool-value" id="visa-tool-mode">--</code>
+          </div>
+          <div class="tool-field tool-field-wide">
+            <span class="tool-label">source_file</span>
+            <code class="tool-value" id="visa-tool-source">visa_card_gen.py</code>
+          </div>
+        </div>
+        <div class="tool-notes">
+          <div class="tool-label">notes</div>
+          <ul class="tool-note-list" id="visa-tool-notes">
+            <li>尚未生成题目。</li>
+          </ul>
+        </div>
+      </div>
+    </section>
   </main>
 
   <script src="/static/app.js"></script>

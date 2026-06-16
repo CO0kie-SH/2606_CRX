@@ -6,28 +6,204 @@
     <title>My Extension</title>
     <style>
       body {
-        width: 240px;
+        width: 420px;
         margin: 0;
         padding: 16px;
         font-family: Arial, "Microsoft YaHei", sans-serif;
+        background: #f7f8fa;
+        color: #222;
       }
 
       h1 {
-        margin: 0 0 8px;
-        font-size: 16px;
+        margin: 0 0 12px;
+        font-size: 18px;
       }
 
-      p {
+      .panel {
+        background: #fff;
+        border: 1px solid #e6e8ee;
+        border-radius: 12px;
+        padding: 12px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04);
+      }
+
+      .panel + .panel {
+        margin-top: 12px;
+      }
+
+      .label {
+        display: block;
+        margin-bottom: 8px;
+        font-size: 13px;
+        color: #555;
+      }
+
+      .row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+
+      input[type="text"] {
+        flex: 1;
+        min-width: 0;
+        height: 36px;
+        padding: 0 10px;
+        border: 1px solid #cfd5df;
+        border-radius: 8px;
+        font-size: 13px;
+        box-sizing: border-box;
+      }
+
+      button {
+        height: 36px;
+        border-radius: 8px;
+        padding: 0 12px;
+        font-size: 13px;
+        cursor: pointer;
+      }
+
+      .save-button {
+        border: 0;
+        background: #2563eb;
+        color: #fff;
+        white-space: nowrap;
+      }
+
+      .save-button:disabled {
+        opacity: 0.7;
+        cursor: default;
+      }
+
+      .status {
+        min-height: 18px;
+        margin-top: 8px;
+        color: #444;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .button-grid {
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        gap: 8px;
+      }
+
+      .feature-button {
+        border: 0;
+        background: #eef2ff;
+        color: #1e3a8a;
+        padding: 0;
+      }
+
+      .feature-button:hover {
+        background: #dbeafe;
+      }
+
+      .message {
         margin: 0;
         color: #444;
         font-size: 13px;
         line-height: 1.5;
       }
+
+      .logs-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+
+      .logs-actions {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+
+      .small-button {
+        height: 28px;
+        border: 1px solid #d6dbe1;
+        background: #fff;
+        color: #334155;
+      }
+
+      .toggle-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+
+      .toggle-label {
+        flex: 1;
+        font-size: 13px;
+        color: #444;
+      }
+
+      .logs-box {
+        height: 260px;
+        margin: 0;
+        padding: 10px;
+        overflow: auto;
+        border: 1px solid #d9dfeb;
+        border-radius: 8px;
+        background: #0f172a;
+        color: #dbeafe;
+        font-family: Consolas, "Courier New", monospace;
+        font-size: 12px;
+        line-height: 1.45;
+        white-space: pre-wrap;
+        word-break: break-all;
+        box-sizing: border-box;
+      }
     </style>
   </head>
   <body>
-    <h1>扩展已加载</h1>
-    <p id="message">这是一个最小 Chrome 扩展示例。</p>
+    <h1>扩展控制面板</h1>
+
+    <section class="panel">
+      <label class="label" for="backend-base-url">前后端交互地址</label>
+      <div class="row">
+        <input id="backend-base-url" type="text" value="http://127.0.0.1:8080/" spellcheck="false">
+        <button class="save-button" id="save-backend-url" type="button">保存</button>
+      </div>
+      <div class="status" id="save-status">首次加载时会自动写入默认值。</div>
+    </section>
+
+    <section class="panel">
+      <div class="label">功能区</div>
+      <div class="button-grid">
+        <button class="feature-button" data-feature="1" type="button">功能1</button>
+        <button class="feature-button" data-feature="2" type="button">功能2</button>
+        <button class="feature-button" data-feature="3" type="button">功能3</button>
+        <button class="feature-button" data-feature="4" type="button">功能4</button>
+        <button class="feature-button" data-feature="5" type="button">功能5</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="logs-header">
+        <div class="label" style="margin: 0;">网页跳转记录</div>
+        <div class="logs-actions">
+          <button class="small-button" id="url-logger-copy" type="button">复制</button>
+          <button class="small-button" id="url-logger-export" type="button">导出</button>
+          <button class="small-button" id="url-logger-clear" type="button">清空</button>
+        </div>
+      </div>
+      <div class="toggle-row">
+        <label class="toggle-label" for="url-logger-enabled">默认开启记录，并汇总所有窗口 / 标签页变动</label>
+        <input id="url-logger-enabled" type="checkbox" checked>
+      </div>
+      <div class="status" id="url-logger-status">正在读取记录状态...</div>
+      <pre class="logs-box" id="url-logger-logs">正在加载日志...</pre>
+    </section>
+
+    <section class="panel">
+      <p class="message" id="message">正在读取当前页面信息...</p>
+    </section>
+
     <script src="popup.js"></script>
   </body>
 </html>

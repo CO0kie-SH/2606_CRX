@@ -1,5 +1,84 @@
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
-const LOGGER_BUILD = "url-capture-v2";
+const LOGGER_BUILD = "url-capture-v3";
+const REDACTED_VALUE = "[REDACTED]";
+const DEFAULT_BACKEND_BASE_URL = "http://127.0.0.1:8080/";
+const BACKEND_BASE_URL_STORAGE_KEY = "settings.backendBaseUrl";
+const URL_LOGGER_SETTINGS_KEY = "urlLogger.settings";
+const URL_LOGGER_LOGS_KEY = "urlLogger.global.logs";
+const URL_LOGGER_STATE_KEY = "urlLogger.global.state";
+const MAX_URL_LOGS = 300;
+const SENSITIVE_PARAM_NAMES = new Set([
+  "access_token",
+  "auth",
+  "authorization",
+  "client_secret",
+  "code",
+  "id_token",
+  "password",
+  "refresh_token",
+  "secret",
+  "session",
+  "sessionid",
+  "sid",
+  "state",
+  "token"
+]);
+
+function shouldRedactParam(name) {
+  return SENSITIVE_PARAM_NAMES.has(String(name || "").toLowerCase());
+}
+
+function redactParams(params) {
+  let changed = false;
+
+  for (const [name] of params.entries()) {
+    if (!shouldRedactParam(name)) {
+      continue;
+    }
+
+    params.set(name, REDACTED_VALUE);
+    changed = true;
+  }
+
+  return changed;
+}
+
+function redactHash(hash) {
+  if (!hash || !hash.includes("?")) {
+    return { hash, changed: false };
+  }
+
+  const questionIndex = hash.indexOf("?");
+  const hashPath = hash.slice(0, questionIndex + 1);
+  const hashQuery = hash.slice(questionIndex + 1);
+  const hashParams = new URLSearchParams(hashQuery);
+  const changed = redactParams(hashParams);
+
+  return {
+    hash: changed ? `${hashPath}${hashParams.toString()}` : hash,
+    changed
+  };
+}
+
+function maskSensitiveUrl(rawUrl) {
+  if (!rawUrl) {
+    return "";
+  }
+
+  try {
+    const url = new URL(rawUrl);
+    const queryChanged = redactParams(url.searchParams);
+    const redactedHash = redactHash(url.hash);
+
+    if (redactedHash.changed) {
+      url.hash = redactedHash.hash;
+    }
+
+    return queryChanged || redactedHash.changed ? url.toString() : rawUrl;
+  } catch (error) {
+    return rawUrl;
+  }
+}
 
 function writeLog(eventName, details = {}) {
   const logEntry = {
@@ -30,76 +109,199 @@ function writeLog(eventName, details = {}) {
   console.groupEnd();
 }
 
-const MAX_URL_LOGS = 100;
-
-function getUrlLoggerStorageKey(tabId) {
-  return `urlLogger.tab.${tabId}`;
-}
-
 function getLocalTime() {
   return new Date().toLocaleString();
 }
 
-async function appendNavigationLog(tabId, entry) {
-  if (!tabId || tabId < 0 || !entry?.url) {
+async function getBackendBaseUrl() {
+  const result = await chrome.storage.local.get(BACKEND_BASE_URL_STORAGE_KEY);
+  const value = String(result[BACKEND_BASE_URL_STORAGE_KEY] || DEFAULT_BACKEND_BASE_URL).trim() || DEFAULT_BACKEND_BASE_URL;
+
+  try {
+    const url = new URL(value);
+    return url.toString().endsWith("/") ? url.toString() : `${url.toString()}/`;
+  } catch (error) {
+    return DEFAULT_BACKEND_BASE_URL;
+  }
+}
+
+async function postExtensionLoadReport(trigger, reason) {
+  try {
+    const backendBaseUrl = await getBackendBaseUrl();
+    const targetUrl = new URL("api/report", backendBaseUrl).toString();
+    const manifest = chrome.runtime.getManifest();
+    const payload = {
+      event_name: "extension_loaded",
+      time: new Date().toISOString(),
+      extension_version: EXTENSION_VERSION,
+      logger_build: LOGGER_BUILD,
+      backend_base_url: backendBaseUrl,
+      details: {
+        trigger,
+        reason,
+        extension_id: chrome.runtime.id,
+        extension_name: manifest.name || ""
+      }
+    };
+    const response = await fetch(targetUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      const responseText = await response.text();
+      writeLog("extension_load_report_failed", {
+        trigger,
+        reason,
+        targetUrl,
+        status: response.status,
+        responseText
+      });
+      return {
+        ok: false,
+        error: `HTTP ${response.status}`,
+        targetUrl
+      };
+    }
+
+    writeLog("extension_load_report_sent", {
+      trigger,
+      reason,
+      targetUrl
+    });
+    return {
+      ok: true,
+      targetUrl
+    };
+  } catch (error) {
+    writeLog("extension_load_report_failed", {
+      trigger,
+      reason,
+      error: String(error)
+    });
+    return {
+      ok: false,
+      error: String(error)
+    };
+  }
+}
+
+async function ensureDefaultSettings() {
+  const result = await chrome.storage.local.get([
+    BACKEND_BASE_URL_STORAGE_KEY,
+    URL_LOGGER_SETTINGS_KEY,
+    URL_LOGGER_LOGS_KEY,
+    URL_LOGGER_STATE_KEY
+  ]);
+  const patch = {};
+
+  if (!result[BACKEND_BASE_URL_STORAGE_KEY]) {
+    patch[BACKEND_BASE_URL_STORAGE_KEY] = DEFAULT_BACKEND_BASE_URL;
+  }
+
+  if (!result[URL_LOGGER_SETTINGS_KEY]) {
+    patch[URL_LOGGER_SETTINGS_KEY] = {
+      enabled: true
+    };
+  }
+
+  if (!Array.isArray(result[URL_LOGGER_LOGS_KEY])) {
+    patch[URL_LOGGER_LOGS_KEY] = [];
+  }
+
+  if (!result[URL_LOGGER_STATE_KEY]) {
+    patch[URL_LOGGER_STATE_KEY] = {
+      lastByTab: {}
+    };
+  }
+
+  if (!Object.keys(patch).length) {
     return;
   }
 
-  const storageKey = getUrlLoggerStorageKey(tabId);
-  const result = await chrome.storage.local.get(storageKey);
-  const state = {
-    enabled: false,
-    logs: [],
-    lastUrl: "",
-    ...(result[storageKey] || {})
+  await chrome.storage.local.set(patch);
+
+  writeLog("default_settings_initialized", {
+    backendBaseUrl: patch[BACKEND_BASE_URL_STORAGE_KEY] || result[BACKEND_BASE_URL_STORAGE_KEY] || DEFAULT_BACKEND_BASE_URL,
+    urlLoggerEnabled: (patch[URL_LOGGER_SETTINGS_KEY] || result[URL_LOGGER_SETTINGS_KEY] || {}).enabled ?? true
+  });
+}
+
+async function getUrlLoggerSettings() {
+  const result = await chrome.storage.local.get(URL_LOGGER_SETTINGS_KEY);
+  return {
+    enabled: true,
+    ...(result[URL_LOGGER_SETTINGS_KEY] || {})
   };
+}
 
-  if (!state.enabled) {
+async function appendNavigationLog(entry) {
+  if (!entry?.url) {
     return;
   }
 
-  if (state.lastUrl === entry.url) {
+  const settings = await getUrlLoggerSettings();
+
+  if (!settings.enabled) {
+    return;
+  }
+
+  const safeUrl = maskSensitiveUrl(entry.url);
+  const result = await chrome.storage.local.get([URL_LOGGER_LOGS_KEY, URL_LOGGER_STATE_KEY]);
+  const logs = Array.isArray(result[URL_LOGGER_LOGS_KEY]) ? result[URL_LOGGER_LOGS_KEY] : [];
+  const state = {
+    lastByTab: {},
+    ...(result[URL_LOGGER_STATE_KEY] || {})
+  };
+  const tabKey = String(entry.tabId ?? "unknown");
+  const signature = [
+    entry.reason || "",
+    safeUrl,
+    entry.error || "",
+    entry.transitionType || ""
+  ].join("|");
+
+  if (state.lastByTab[tabKey] === signature && entry.reason !== "recording_enabled") {
     return;
   }
 
   const navigation = {
     time: getLocalTime(),
     title: "",
-    ...entry
+    ...entry,
+    url: safeUrl
   };
 
-  state.lastUrl = navigation.url;
-  state.logs = [navigation, ...state.logs].slice(0, MAX_URL_LOGS);
+  state.lastByTab[tabKey] = signature;
 
   await chrome.storage.local.set({
-    [storageKey]: state
+    [URL_LOGGER_LOGS_KEY]: [navigation, ...logs].slice(0, MAX_URL_LOGS),
+    [URL_LOGGER_STATE_KEY]: state
   });
 
   writeLog("url_jump_recorded", {
     tabContext: {
-      tabId
+      tabId: entry.tabId ?? null,
+      windowId: entry.windowId ?? null
     },
     navigation
   });
 
-  chrome.tabs.sendMessage(
-    tabId,
-    {
-      type: "URL_LOG_UPDATED",
-      storageKey,
-      navigation
-    },
-    () => {
-      // During real navigations the old page may already be gone. That is normal.
-      void chrome.runtime.lastError;
-    }
-  );
+  chrome.runtime.sendMessage({ type: "URL_LOG_UPDATED" }, () => {
+    void chrome.runtime.lastError;
+  });
 }
 
 function recordNavigationAttempt(source, details) {
-  appendNavigationLog(details.tabId, {
+  void appendNavigationLog({
     reason: source,
     url: details.url,
+    title: details.title || "",
+    tabId: details.tabId ?? null,
+    windowId: details.windowId ?? null,
     frameId: details.frameId ?? null,
     requestId: details.requestId || "",
     transitionType: details.transitionType || "",
@@ -108,6 +310,7 @@ function recordNavigationAttempt(source, details) {
 }
 
 chrome.runtime.onInstalled.addListener((details) => {
+  void ensureDefaultSettings().then(() => postExtensionLoadReport("onInstalled", details.reason || "unknown"));
   writeLog("extension_installed", {
     reason: details.reason,
     previousVersion: details.previousVersion || null
@@ -117,8 +320,10 @@ chrome.runtime.onInstalled.addListener((details) => {
 writeLog("background_loaded", {
   message: "Background service worker loaded with navigation capture listeners."
 });
+void ensureDefaultSettings();
 
 chrome.runtime.onStartup.addListener(() => {
+  void ensureDefaultSettings().then(() => postExtensionLoadReport("onStartup", "browser_started"));
   writeLog("browser_started");
 });
 
@@ -151,16 +356,70 @@ chrome.webRequest.onBeforeRequest.addListener(
   }
 );
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (!changeInfo.url) {
     return;
   }
 
   recordNavigationAttempt("tabs.onUpdated.url", {
     tabId,
+    windowId: tab?.windowId ?? null,
     url: changeInfo.url,
+    title: tab?.title || "",
     frameId: 0
   });
+});
+
+chrome.tabs.onActivated.addListener(async (activeInfo) => {
+  try {
+    const tab = await chrome.tabs.get(activeInfo.tabId);
+
+    if (!tab?.url) {
+      return;
+    }
+
+    recordNavigationAttempt("tabs.onActivated", {
+      tabId: tab.id ?? null,
+      windowId: tab.windowId ?? null,
+      url: tab.url,
+      title: tab.title || "",
+      frameId: 0
+    });
+  } catch (error) {
+    writeLog("tabs_on_activated_failed", {
+      error: String(error)
+    });
+  }
+});
+
+chrome.windows.onFocusChanged.addListener(async (windowId) => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) {
+    return;
+  }
+
+  try {
+    const tabs = await chrome.tabs.query({
+      active: true,
+      windowId
+    });
+    const tab = tabs[0];
+
+    if (!tab?.url) {
+      return;
+    }
+
+    recordNavigationAttempt("windows.onFocusChanged", {
+      tabId: tab.id ?? null,
+      windowId: tab.windowId ?? null,
+      url: tab.url,
+      title: tab.title || "",
+      frameId: 0
+    });
+  } catch (error) {
+    writeLog("windows_on_focus_changed_failed", {
+      error: String(error)
+    });
+  }
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -172,6 +431,58 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         windowId: sender.tab?.windowId || null,
         incognito: Boolean(sender.tab?.incognito)
       }
+    });
+    return true;
+  }
+
+  if (message?.type === "SET_URL_LOGGER_ENABLED") {
+    chrome.storage.local.set({
+      [URL_LOGGER_SETTINGS_KEY]: {
+        enabled: Boolean(message.enabled)
+      }
+    }).then(() => {
+      writeLog("url_logger_setting_changed", {
+        enabled: Boolean(message.enabled)
+      });
+      sendResponse({ ok: true });
+    });
+    return true;
+  }
+
+  if (message?.type === "CLEAR_URL_LOGS") {
+    chrome.storage.local.set({
+      [URL_LOGGER_LOGS_KEY]: [],
+      [URL_LOGGER_STATE_KEY]: {
+        lastByTab: {}
+      }
+    }).then(() => {
+      writeLog("url_logs_cleared");
+      chrome.runtime.sendMessage({ type: "URL_LOG_UPDATED" }, () => {
+        void chrome.runtime.lastError;
+      });
+      sendResponse({ ok: true });
+    });
+    return true;
+  }
+
+  if (message?.type === "CONTENT_URL_EVENT") {
+    recordNavigationAttempt(message.payload?.reason || "content.url_event", {
+      tabId: sender.tab?.id ?? null,
+      windowId: sender.tab?.windowId ?? null,
+      url: message.payload?.url || sender.tab?.url || "",
+      title: message.payload?.title || sender.tab?.title || "",
+      frameId: sender.frameId ?? 0
+    });
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (message?.type === "SEND_EXTENSION_LOAD_REPORT") {
+    postExtensionLoadReport(
+      String(message.trigger || "popup_manual"),
+      String(message.reason || "manual_test")
+    ).then((result) => {
+      sendResponse(result);
     });
     return true;
   }
