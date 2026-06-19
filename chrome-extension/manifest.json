@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "My Chrome Extension",
   "version": "26.6.19",
-  "version_name": "26.6.19D",
+  "version_name": "26.6.19E",
   "description": "A starter Chrome extension.",
   "permissions": [
     "activeTab",
@@ -10,7 +10,8 @@
     "tabs",
     "scripting",
     "webNavigation",
-    "webRequest"
+    "webRequest",
+    "notifications"
   ],
   "host_permissions": [
     "http://*/*",

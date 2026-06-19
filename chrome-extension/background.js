@@ -4,6 +4,8 @@ const LOGGER_BUILD = "url-capture-v6";
 const REDACTED_VALUE = "[REDACTED]";
 const DEFAULT_BACKEND_BASE_URL = "http://127.0.0.1:8080/";
 const DEFAULT_REQUEST_TIMEOUT_MS = 3000;
+const HTML_TEXT_UPLOAD_TIMEOUT_MS = 10000;
+const HTML_FULL_UPLOAD_TIMEOUT_MS = 30000;
 const BACKEND_BASE_URL_STORAGE_KEY = "settings.backendBaseUrl";
 const URL_LOGGER_SETTINGS_KEY = "urlLogger.settings";
 const URL_LOGGER_LOGS_KEY = "urlLogger.global.logs";
@@ -536,6 +538,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "START_IP_CAPTURE") {
+    sendResponse({ ok: true, message: "任务已启动" });
+
+    handleIpCapture(
+      String(message.backendBaseUrl || DEFAULT_BACKEND_BASE_URL),
+      String(message.token || "")
+    ).catch((error) => {
+      writeLog("ip_capture_error", {
+        error: error.message || String(error)
+      });
+    });
+
+    return true;
+  }
+
   if (!message || message.type !== "LOG_EVENT") {
     return false;
   }
@@ -550,4 +567,253 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   sendResponse({ ok: true });
   return true;
+});
+
+const ipCaptureState = {
+  currentTabId: null,
+  notificationId: null
+};
+
+async function findOrOpenTargetPage(targetUrl) {
+  const tabs = await chrome.tabs.query({});
+  const existingTab = tabs.find(tab => tab.url && tab.url.startsWith(targetUrl));
+
+  if (existingTab) {
+    writeLog("target_page_found", {
+      targetUrl,
+      tabId: existingTab.id,
+      windowId: existingTab.windowId
+    });
+    await chrome.tabs.update(existingTab.id, { active: true });
+    await chrome.windows.update(existingTab.windowId, { focused: true });
+    return existingTab;
+  }
+
+  writeLog("target_page_opening", { targetUrl });
+
+  const newTab = await chrome.tabs.create({
+    url: targetUrl,
+    active: false
+  });
+
+  writeLog("target_page_opened", {
+    targetUrl,
+    tabId: newTab.id,
+    windowId: newTab.windowId
+  });
+
+  return newTab;
+}
+
+async function waitForPageComplete(tabId, timeoutMs = 30000) {
+  const startTime = Date.now();
+
+  return new Promise((resolve, reject) => {
+    const checkInterval = setInterval(async () => {
+      if (Date.now() - startTime > timeoutMs) {
+        clearInterval(checkInterval);
+        reject(new Error("等待页面加载超时"));
+        return;
+      }
+
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        if (tab.status === "complete") {
+          clearInterval(checkInterval);
+          resolve(tab);
+        }
+      } catch (error) {
+        clearInterval(checkInterval);
+        reject(error);
+      }
+    }, 500);
+  });
+}
+
+async function extractPageContent(tabId) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => ({
+      title: document.title || "",
+      url: window.location.href,
+      text: document.body ? document.body.innerText : "",
+      html: document.documentElement ? document.documentElement.outerHTML : ""
+    })
+  });
+
+  const page = results?.[0]?.result;
+  if (!page) {
+    throw new Error("页面内容提取失败");
+  }
+
+  return page;
+}
+
+function generateJsonRpcId() {
+  return Date.now() * 1000000 + Math.floor(Math.random() * 1000000);
+}
+
+async function requestJsonRpc(targetUrl, method, params, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS) {
+  const rpcId = generateJsonRpcId();
+  const rpcRequest = {
+    jsonrpc: "2.0",
+    method,
+    params,
+    id: rpcId
+  };
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(targetUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(rpcRequest),
+      signal: controller.signal
+    });
+
+    clearTimeout(timeoutId);
+
+    const responseText = await response.text();
+    let rpcResponse;
+
+    try {
+      rpcResponse = responseText ? JSON.parse(responseText) : {};
+    } catch (error) {
+      throw new Error("JSON-RPC 响应解析失败");
+    }
+
+    if (!response.ok) {
+      throw new Error(rpcResponse.error?.message || `HTTP ${response.status}`);
+    }
+
+    if (rpcResponse.id !== rpcId) {
+      throw new Error("JSON-RPC ID 不匹配");
+    }
+
+    if (rpcResponse.error) {
+      throw new Error(rpcResponse.error.message || "JSON-RPC 错误");
+    }
+
+    return rpcResponse.result || {};
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error.name === "AbortError") {
+      throw new Error(`请求超时（${timeoutMs / 1000}秒）`);
+    }
+    throw error;
+  }
+}
+
+async function postHtmlCaptureJsonRpc(backendBaseUrl, captureType, page, tab, token) {
+  const targetPath = captureType === "text" ? "api/html/text" : "api/html/all";
+  const targetUrl = new URL(targetPath, backendBaseUrl).toString();
+  const contentField = captureType === "text" ? "text" : "html";
+  const timeoutMs = captureType === "text" ? HTML_TEXT_UPLOAD_TIMEOUT_MS : HTML_FULL_UPLOAD_TIMEOUT_MS;
+  const method = captureType === "text" ? "html.captureText" : "html.captureAll";
+
+  const params = {
+    token,
+    time: new Date().toISOString(),
+    extension_version: EXTENSION_VERSION,
+    extension_version_name: EXTENSION_VERSION_NAME,
+    page: {
+      title: page.title || tab.title || "",
+      url: maskSensitiveUrl(page.url || tab.url || ""),
+      tabId: tab.id ?? null,
+      windowId: tab.windowId ?? null,
+      sourceReason: "button3_background_capture"
+    },
+    [contentField]: page[contentField] || ""
+  };
+
+  return await requestJsonRpc(targetUrl, method, params, timeoutMs);
+}
+
+function showNotification(id, title, message, iconUrl = "icon.png") {
+  return chrome.notifications.create(id, {
+    type: "basic",
+    iconUrl,
+    title,
+    message
+  });
+}
+
+async function handleIpCapture(backendBaseUrl, token) {
+  const targetUrl = "https://ipinfo.dkly.net/";
+  const notificationId = `ip-capture-${Date.now()}`;
+
+  ipCaptureState.notificationId = notificationId;
+
+  try {
+    await showNotification(notificationId, "抓取IP信息", "正在打开目标页面...");
+
+    const tab = await findOrOpenTargetPage(targetUrl);
+    ipCaptureState.currentTabId = tab.id;
+
+    await showNotification(notificationId, "抓取IP信息", "等待页面加载完成...");
+
+    const completedTab = await waitForPageComplete(tab.id);
+
+    writeLog("ip_capture_page_loaded", {
+      tabId: completedTab.id,
+      url: completedTab.url
+    });
+
+    await showNotification(notificationId, "抓取IP信息", "正在提取页面内容...");
+
+    const page = await extractPageContent(completedTab.id);
+
+    writeLog("ip_capture_content_extracted", {
+      tabId: completedTab.id,
+      textBytes: new Blob([page.text || ""]).size,
+      htmlBytes: new Blob([page.html || ""]).size
+    });
+
+    await showNotification(notificationId, "抓取IP信息", "正在上传到后端...");
+
+    const textResult = await postHtmlCaptureJsonRpc(backendBaseUrl, "text", page, completedTab, token);
+    const htmlResult = await postHtmlCaptureJsonRpc(backendBaseUrl, "all", page, completedTab, token);
+
+    writeLog("ip_capture_completed", {
+      tabId: completedTab.id,
+      textBytes: textResult.bytes,
+      htmlBytes: htmlResult.bytes
+    });
+
+    await showNotification(notificationId, "抓取完成", "IP信息已成功保存，点击查看页面");
+
+    return {
+      ok: true,
+      tabId: completedTab.id,
+      textBytes: textResult.bytes,
+      htmlBytes: htmlResult.bytes
+    };
+  } catch (error) {
+    writeLog("ip_capture_failed", {
+      error: error.message || String(error)
+    });
+
+    await showNotification(notificationId, "抓取失败", error.message || "未知错误");
+
+    return {
+      ok: false,
+      error: error.message || String(error)
+    };
+  }
+}
+
+chrome.notifications.onClicked.addListener((notificationId) => {
+  if (notificationId === ipCaptureState.notificationId && ipCaptureState.currentTabId) {
+    chrome.tabs.update(ipCaptureState.currentTabId, { active: true }).then(() => {
+      chrome.tabs.get(ipCaptureState.currentTabId).then((tab) => {
+        chrome.windows.update(tab.windowId, { focused: true });
+      });
+    }).catch(() => {
+      // Tab might be closed
+    });
+  }
+
+  chrome.notifications.clear(notificationId);
 });

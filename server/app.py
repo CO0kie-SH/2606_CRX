@@ -215,7 +215,21 @@ async def api_visa(_request: web.Request) -> web.Response:
     return web.json_response(build_visa_api_payload())
 
 
-async def api_get_crc_token(_request: web.Request) -> web.Response:
+async def api_get_crc_token(request: web.Request) -> web.Response:
+    if request.content_type == "application/json":
+        try:
+            payload = await request.json()
+            if is_jsonrpc_request(payload):
+                token = f"crx-{secrets.token_hex(16)}"
+                result = {
+                    "ok": True,
+                    "token": token,
+                    "issued_at": utc_iso_now(),
+                }
+                return json_response_with_cors(build_jsonrpc_response(result, payload.get("id")))
+        except json.JSONDecodeError:
+            pass
+
     token = f"crx-{secrets.token_hex(16)}"
     return json_response_with_cors(
         {
@@ -275,43 +289,68 @@ async def api_token_create(request: web.Request) -> web.Response:
             status=400,
         )
 
-    token = str(payload.get("token", "")).strip()
-    if not is_valid_token(token):
-        return json_response_with_cors(
-            {
-                "ok": False,
-                "error": "Token already exists or invalid.",
-                "token": token,
-            },
-            status=400,
-        )
+    if is_jsonrpc_request(payload):
+        rpc_id = payload.get("id")
+        params = payload.get("params")
 
-    tabs = payload.get("tabs")
+        if not isinstance(params, dict):
+            return json_response_with_cors(
+                build_jsonrpc_error(-32602, "Invalid params: must be an object.", rpc_id),
+                status=400
+            )
+
+        token = str(params.get("token", "")).strip()
+        tabs = params.get("tabs")
+    else:
+        token = str(payload.get("token", "")).strip()
+        tabs = payload.get("tabs")
+        rpc_id = None
+
+    if not is_valid_token(token):
+        error_response = {
+            "ok": False,
+            "error": "Token already exists or invalid.",
+            "token": token,
+        }
+        if rpc_id is not None:
+            return json_response_with_cors(
+                build_jsonrpc_error(-32602, "Token already exists or invalid.", rpc_id),
+                status=400
+            )
+        return json_response_with_cors(error_response, status=400)
+
     if not isinstance(tabs, list):
-        return json_response_with_cors(
-            {
-                "ok": False,
-                "error": "tabs must be an array.",
-                "token": token,
-            },
-            status=400,
-        )
+        error_response = {
+            "ok": False,
+            "error": "tabs must be an array.",
+            "token": token,
+        }
+        if rpc_id is not None:
+            return json_response_with_cors(
+                build_jsonrpc_error(-32602, "tabs must be an array.", rpc_id),
+                status=400
+            )
+        return json_response_with_cors(error_response, status=400)
 
     DB_DIR.mkdir(parents=True, exist_ok=True)
     csv_file = build_token_csv_path(token)
     if csv_file.exists():
-        return json_response_with_cors(
-            {
-                "ok": False,
-                "error": "Token already exists or invalid.",
-                "token": token,
-            },
-            status=400,
-        )
+        error_response = {
+            "ok": False,
+            "error": "Token already exists or invalid.",
+            "token": token,
+        }
+        if rpc_id is not None:
+            return json_response_with_cors(
+                build_jsonrpc_error(-32602, "Token already exists or invalid.", rpc_id),
+                status=400
+            )
+        return json_response_with_cors(error_response, status=400)
 
-    created_at = payload.get("time") if isinstance(payload.get("time"), str) and payload.get("time") else utc_iso_now()
-    extension_version = str(payload.get("extension_version", ""))
-    extension_version_name = str(payload.get("extension_version_name", ""))
+    params_or_payload = payload.get("params") if rpc_id is not None else payload
+    created_at = params_or_payload.get("time") if isinstance(params_or_payload.get("time"), str) and params_or_payload.get("time") else utc_iso_now()
+    extension_version = str(params_or_payload.get("extension_version", ""))
+    extension_version_name = str(params_or_payload.get("extension_version_name", ""))
     window_snapshot_json = json.dumps(tabs, ensure_ascii=False, separators=(",", ":"))
     row = [
         "登录成功",
@@ -331,24 +370,31 @@ async def api_token_create(request: web.Request) -> web.Response:
             writer.writerow(row)
         build_token_dir_path(token).mkdir(parents=True, exist_ok=False)
     except FileExistsError:
-        return json_response_with_cors(
-            {
-                "ok": False,
-                "error": "Token already exists or invalid.",
-                "token": token,
-            },
-            status=400,
-        )
+        error_response = {
+            "ok": False,
+            "error": "Token already exists or invalid.",
+            "token": token,
+        }
+        if rpc_id is not None:
+            return json_response_with_cors(
+                build_jsonrpc_error(-32602, "Token already exists or invalid.", rpc_id),
+                status=400
+            )
+        return json_response_with_cors(error_response, status=400)
 
     LOGGER.info("Created token CSV. token=%s file=%s tabs=%s", token, csv_file, len(tabs))
-    return json_response_with_cors(
-        {
-            "ok": True,
-            "token": token,
-            "saved_to": display_token_csv_path(csv_file),
-            "folder": display_token_csv_path(build_token_dir_path(token)),
-        }
-    )
+
+    result = {
+        "ok": True,
+        "token": token,
+        "saved_to": display_token_csv_path(csv_file),
+        "folder": display_token_csv_path(build_token_dir_path(token)),
+    }
+
+    if rpc_id is not None:
+        return json_response_with_cors(build_jsonrpc_response(result, rpc_id))
+
+    return json_response_with_cors(result)
 
 
 async def api_log(request: web.Request) -> web.Response:
@@ -444,6 +490,152 @@ def display_path(path: Path) -> str:
         return str(path)
 
 
+def build_jsonrpc_response(result: dict, rpc_id: int) -> dict:
+    return {
+        "jsonrpc": "2.0",
+        "result": result,
+        "id": rpc_id
+    }
+
+
+def build_jsonrpc_error(code: int, message: str, rpc_id: int = None) -> dict:
+    return {
+        "jsonrpc": "2.0",
+        "error": {
+            "code": code,
+            "message": message
+        },
+        "id": rpc_id
+    }
+
+
+def is_jsonrpc_request(payload: dict) -> bool:
+    return payload.get("jsonrpc") == "2.0" and "method" in payload and "id" in payload
+
+
+def extract_city_from_text(text: str) -> dict | None:
+    """
+    从文本中提取 city 和 region name 信息
+    匹配格式: "name": "Tokyo"\n        },\n        "city": "Chiyoda"
+    """
+    import re
+
+    pattern = r'"name":\s*"([^"]+)"\s*\}\s*,\s*"city":\s*"([^"]+)"'
+    match = re.search(pattern, text)
+
+    if match:
+        return {
+            "region_name": match.group(1),
+            "city": match.group(2)
+        }
+
+    return None
+
+
+async def handle_jsonrpc_html_capture(request: web.Request, payload: dict, capture_type: str) -> web.Response:
+    rpc_id = payload.get("id")
+    params = payload.get("params")
+
+    if not isinstance(params, dict):
+        return json_response_with_cors(
+            build_jsonrpc_error(-32602, "Invalid params: must be an object.", rpc_id),
+            status=400
+        )
+
+    content_field = "text" if capture_type == "text" else "html"
+    content = params.get(content_field)
+    if not isinstance(content, str):
+        return json_response_with_cors(
+            build_jsonrpc_error(-32602, f"Invalid params: {content_field} must be a string.", rpc_id),
+            status=400
+        )
+
+    if capture_type == "all":
+        result = await save_html_file_capture_jsonrpc(params, content, request, rpc_id)
+        return json_response_with_cors(build_jsonrpc_response(result, rpc_id))
+
+    enriched_payload = {
+        "event_name": f"html_{capture_type}_captured",
+        "capture_type": capture_type,
+        "received_at": utc_iso_now(),
+        "remote": request.remote or "",
+        "user_agent": request.headers.get("User-Agent", ""),
+        "rpc_id": rpc_id,
+        **params,
+    }
+    log_file = append_named_jsonl_log(f"html-{capture_type}", enriched_payload)
+    LOGGER.info(
+        "Saved HTML capture (JSON-RPC). type=%s file=%s bytes=%s rpc_id=%s",
+        capture_type,
+        log_file,
+        len(content.encode("utf-8")),
+        rpc_id,
+    )
+
+    result = {
+        "ok": True,
+        "saved_to": str(log_file),
+        "received_at": enriched_payload["received_at"],
+        "bytes": len(content.encode("utf-8")),
+        "rpc_id": rpc_id,
+    }
+
+    city_info = extract_city_from_text(content)
+    if city_info:
+        result["city"] = city_info["city"]
+        result["region_name"] = city_info["region_name"]
+        LOGGER.info(
+            "Extracted city info from text. rpc_id=%s city=%s region_name=%s",
+            rpc_id,
+            city_info["city"],
+            city_info["region_name"],
+        )
+
+    return json_response_with_cors(build_jsonrpc_response(result, rpc_id))
+
+
+async def save_html_file_capture_jsonrpc(params: dict, content: str, request: web.Request, rpc_id: int) -> dict:
+    token = str(params.get("token", "")).strip()
+    if not is_valid_token(token):
+        raise ValueError("Valid token is required.")
+
+    token_dir = build_token_dir_path(token)
+    if not token_dir.exists() or not token_dir.is_dir():
+        raise ValueError("Token folder not found.")
+
+    capture_time = params.get("time") if isinstance(params.get("time"), str) else ""
+    html_file = token_dir / f"{sanitize_capture_time(capture_time)}.html"
+    if html_file.exists():
+        suffix = secrets.token_hex(2)
+        html_file = token_dir / f"{sanitize_capture_time(capture_time)}-{suffix}.html"
+
+    html_file.write_text(content, encoding="utf-8")
+    LOGGER.info(
+        "Saved HTML file capture (JSON-RPC). token=%s file=%s bytes=%s rpc_id=%s",
+        token,
+        html_file,
+        len(content.encode("utf-8")),
+        rpc_id,
+    )
+
+    return {
+        "ok": True,
+        "saved_to": display_path(html_file),
+        "received_at": utc_iso_now(),
+        "bytes": len(content.encode("utf-8")),
+        "token": token,
+        "rpc_id": rpc_id,
+        "user_agent": request.headers.get("User-Agent", ""),
+    }
+
+
+def display_path(path: Path) -> str:
+    try:
+        return path.relative_to(BASE_DIR).as_posix()
+    except ValueError:
+        return str(path)
+
+
 async def save_html_file_capture(payload: dict, content: str, request: web.Request) -> web.Response:
     token = str(payload.get("token", "")).strip()
     if not is_valid_token(token):
@@ -522,6 +714,9 @@ async def api_html_capture(request: web.Request, capture_type: str) -> web.Respo
             status=400,
         )
 
+    if is_jsonrpc_request(payload):
+        return await handle_jsonrpc_html_capture(request, payload, capture_type)
+
     content_field = "text" if capture_type == "text" else "html"
     content = payload.get(content_field)
     if not isinstance(content, str):
@@ -596,6 +791,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/visa", api_visa)
     app.router.add_options("/api/get_crc_token", api_log_options)
     app.router.add_get("/api/get_crc_token", api_get_crc_token)
+    app.router.add_post("/api/get_crc_token", api_get_crc_token)
     app.router.add_options("/api/token/create", api_log_options)
     app.router.add_post("/api/token/create", api_token_create)
     app.router.add_options("/api/html/text", api_log_options)

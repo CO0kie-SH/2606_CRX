@@ -206,6 +206,51 @@ async function requestJson(targetUrl, options = {}, timeoutMs = DEFAULT_REQUEST_
   return data;
 }
 
+function generateJsonRpcId() {
+  return Date.now() * 1000000 + Math.floor(Math.random() * 1000000);
+}
+
+async function requestJsonRpc(targetUrl, method, params, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS) {
+  const rpcId = generateJsonRpcId();
+  const rpcRequest = {
+    jsonrpc: "2.0",
+    method,
+    params,
+    id: rpcId
+  };
+
+  const response = await fetchWithTimeout(targetUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(rpcRequest)
+  }, timeoutMs);
+
+  const responseText = await response.text();
+  let rpcResponse;
+
+  try {
+    rpcResponse = responseText ? JSON.parse(responseText) : {};
+  } catch (error) {
+    throw new Error("JSON-RPC 响应解析失败：" + responseText);
+  }
+
+  if (!response.ok) {
+    throw new Error(rpcResponse.error?.message || `HTTP ${response.status}: ${responseText || "请求失败。"}`);
+  }
+
+  if (rpcResponse.id !== rpcId) {
+    throw new Error(`JSON-RPC ID 不匹配：期望 ${rpcId}，收到 ${rpcResponse.id}`);
+  }
+
+  if (rpcResponse.error) {
+    throw new Error(rpcResponse.error.message || "JSON-RPC 错误");
+  }
+
+  return rpcResponse.result || {};
+}
+
 function normalizeBackendBaseUrl(rawValue) {
   const value = String(rawValue || "").trim() || DEFAULT_BACKEND_BASE_URL;
 
@@ -344,8 +389,36 @@ function formatRuntimeLogEntry(entry, index, total) {
     lines.push(`保存位置: ${details.savedTo}`);
   }
 
+  if (details.windowId !== undefined) {
+    lines.push(`窗口ID: ${details.windowId}`);
+  }
+
+  if (details.tabId !== undefined) {
+    lines.push(`标签页ID: ${details.tabId}`);
+  }
+
   if (details.url) {
     lines.push(`URL: ${details.url}`);
+  }
+
+  if (details.hostname) {
+    lines.push(`域名: ${details.hostname}`);
+  }
+
+  if (details.title) {
+    lines.push(`标题: ${details.title}`);
+  }
+
+  if (details.status) {
+    lines.push(`状态: ${details.status}`);
+  }
+
+  if (details.active !== undefined) {
+    lines.push(`活动: ${details.active}`);
+  }
+
+  if (details.incognito !== undefined) {
+    lines.push(`隐私: ${details.incognito}`);
   }
 
   if (details.textBytes !== undefined) {
@@ -354,6 +427,22 @@ function formatRuntimeLogEntry(entry, index, total) {
 
   if (details.htmlBytes !== undefined) {
     lines.push(`HTML字节: ${details.htmlBytes}`);
+  }
+
+  if (details.rpcId !== undefined) {
+    lines.push(`RPC ID: ${details.rpcId}`);
+  }
+
+  if (details.city) {
+    lines.push(`城市: ${details.city}`);
+  }
+
+  if (details.regionName) {
+    lines.push(`区域: ${details.regionName}`);
+  }
+
+  if (details.bytes !== undefined) {
+    lines.push(`字节数: ${details.bytes}`);
   }
 
   if (details.error) {
@@ -497,9 +586,7 @@ async function clearUrlLogs() {
 
 async function getBackendToken(backendBaseUrl) {
   const targetUrl = new URL("api/get_crc_token", backendBaseUrl).toString();
-  const data = await requestJson(targetUrl, {
-    method: "GET"
-  });
+  const data = await requestJsonRpc(targetUrl, "token.generate", {});
 
   if (!data.ok || !data.token) {
     throw new Error(data.error || "获取后端 token 失败。");
@@ -532,19 +619,15 @@ async function collectAllTabInfo() {
 
 async function createBackendToken(backendBaseUrl, token, tabs) {
   const targetUrl = new URL("api/token/create", backendBaseUrl).toString();
-  const data = await requestJson(targetUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      token,
-      time: new Date().toISOString(),
-      extension_version: manifest.version || "",
-      extension_version_name: manifest.version_name || manifest.version || "",
-      tabs
-    })
-  });
+  const params = {
+    token,
+    time: new Date().toISOString(),
+    extension_version: manifest.version || "",
+    extension_version_name: manifest.version_name || manifest.version || "",
+    tabs
+  };
+
+  const data = await requestJsonRpc(targetUrl, "token.create", params);
 
   if (!data.ok) {
     throw new Error(data.error || "创建后端 token 失败。");
@@ -709,40 +792,206 @@ async function extractPageContentByFetch(tab) {
   };
 }
 
-async function postHtmlCapture(backendBaseUrl, captureType, page, tab) {
+async function postHtmlCapture(backendBaseUrl, captureType, page, tab, token) {
   const targetPath = captureType === "text" ? "api/html/text" : "api/html/all";
   const targetUrl = new URL(targetPath, backendBaseUrl).toString();
   const contentField = captureType === "text" ? "text" : "html";
   const timeoutMs = captureType === "text" ? HTML_TEXT_UPLOAD_TIMEOUT_MS : HTML_FULL_UPLOAD_TIMEOUT_MS;
-  const data = await requestJson(targetUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      token: popupState.backendToken || "",
-      time: new Date().toISOString(),
-      extension_version: manifest.version || "",
-      extension_version_name: manifest.version_name || manifest.version || "",
-      page: {
-        title: page.title || tab.title || "",
-        url: maskSensitiveUrl(page.url || tab.url || ""),
-        tabId: tab.id ?? null,
-        windowId: tab.windowId ?? null,
-        sourceReason: "current_active_tab"
-      },
-      [contentField]: page[contentField] || ""
-    })
-  }, timeoutMs);
+  const method = captureType === "text" ? "html.captureText" : "html.captureAll";
 
-  if (!data.ok) {
-    throw new Error(data.error || `发送 ${targetPath} 失败。`);
+  const params = {
+    token: token || popupState.backendToken || "",
+    time: new Date().toISOString(),
+    extension_version: manifest.version || "",
+    extension_version_name: manifest.version_name || manifest.version || "",
+    page: {
+      title: page.title || tab.title || "",
+      url: maskSensitiveUrl(page.url || tab.url || ""),
+      tabId: tab.id ?? null,
+      windowId: tab.windowId ?? null,
+      sourceReason: captureType === "text" ? "button2_text_capture" : "button2_html_capture"
+    },
+    [contentField]: page[contentField] || ""
+  };
+
+  const result = await requestJsonRpc(targetUrl, method, params, timeoutMs);
+
+  if (!result.ok) {
+    throw new Error(result.error || `发送 ${targetPath} 失败。`);
   }
 
   return {
-    ...data,
+    ...result,
     targetUrl
   };
+}
+
+async function findOrOpenTargetPage(targetUrl) {
+  const tabs = await chrome.tabs.query({});
+  const existingTab = tabs.find(tab => tab.url && tab.url.startsWith(targetUrl));
+
+  if (existingTab) {
+    await appendRuntimeLog("target_page_found", {
+      targetUrl,
+      tabId: existingTab.id,
+      windowId: existingTab.windowId
+    });
+    await chrome.tabs.update(existingTab.id, { active: true });
+    await chrome.windows.update(existingTab.windowId, { focused: true });
+    return existingTab;
+  }
+
+  await appendRuntimeLog("target_page_opening", {
+    targetUrl
+  });
+
+  const newTab = await chrome.tabs.create({
+    url: targetUrl,
+    active: true
+  });
+
+  await appendRuntimeLog("target_page_opened", {
+    targetUrl,
+    tabId: newTab.id,
+    windowId: newTab.windowId
+  });
+
+  return newTab;
+}
+
+async function waitForPageComplete(tabId, timeoutMs = 30000) {
+  const startTime = Date.now();
+
+  return new Promise((resolve, reject) => {
+    const checkInterval = setInterval(async () => {
+      if (Date.now() - startTime > timeoutMs) {
+        clearInterval(checkInterval);
+        reject(new Error("等待页面加载超时"));
+        return;
+      }
+
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        if (tab.status === "complete") {
+          clearInterval(checkInterval);
+          resolve(tab);
+        }
+      } catch (error) {
+        clearInterval(checkInterval);
+        reject(error);
+      }
+    }, 500);
+  });
+}
+
+async function inspectCurrentPage() {
+  const backendBaseUrl = normalizeBackendBaseUrl(backendBaseUrlInput.value);
+  const token = popupState.backendToken || "";
+
+  if (!token) {
+    throw new Error("请先点击\"刷新后端token\"。");
+  }
+
+  const targetUrl = "https://ipinfo.dkly.net/";
+
+  await appendRuntimeLog("page_inspect_started", {
+    backendBaseUrl,
+    targetUrl
+  });
+
+  try {
+    const tab = await findOrOpenTargetPage(targetUrl);
+
+    await appendRuntimeLog("page_waiting_complete", {
+      backendBaseUrl,
+      targetUrl,
+      tabId: tab.id,
+      windowId: tab.windowId
+    });
+
+    const completedTab = await waitForPageComplete(tab.id);
+
+    await appendRuntimeLog("page_load_completed", {
+      backendBaseUrl,
+      targetUrl,
+      tabId: completedTab.id,
+      status: completedTab.status
+    });
+
+    const pageInfo = {
+      windowId: completedTab.windowId ?? null,
+      tabId: completedTab.id ?? null,
+      title: completedTab.title || "",
+      url: maskSensitiveUrl(completedTab.url || ""),
+      hostname: getHostname(completedTab.url || ""),
+      status: completedTab.status || "",
+      active: completedTab.active ?? false,
+      incognito: completedTab.incognito ?? false
+    };
+
+    await appendRuntimeLog("page_inspect_completed", {
+      backendBaseUrl,
+      ...pageInfo
+    });
+
+    let page;
+
+    try {
+      page = await extractPageContentByScripting(completedTab);
+    } catch (error) {
+      await appendRuntimeLog("page_extract_scripting_failed", {
+        backendBaseUrl,
+        url: maskSensitiveUrl(completedTab.url || ""),
+        error: error.message || String(error)
+      });
+
+      try {
+        page = await extractPageContentFromTab(completedTab.id);
+      } catch (contentScriptError) {
+        await appendRuntimeLog("page_extract_content_script_failed", {
+          backendBaseUrl,
+          url: maskSensitiveUrl(completedTab.url || ""),
+          error: contentScriptError.message || String(contentScriptError)
+        });
+        page = await extractPageContentByFetch(completedTab);
+      }
+    }
+
+    await appendRuntimeLog("page_content_extracted", {
+      backendBaseUrl,
+      token,
+      url: maskSensitiveUrl(page.url || completedTab.url || ""),
+      textBytes: new Blob([page.text || ""]).size,
+      htmlBytes: new Blob([page.html || ""]).size
+    });
+
+    const textResult = await postHtmlCapture(backendBaseUrl, "text", page, completedTab, token);
+    const htmlResult = await postHtmlCapture(backendBaseUrl, "all", page, completedTab, token);
+
+    await appendRuntimeLog("page_content_sent", {
+      backendBaseUrl,
+      token,
+      url: maskSensitiveUrl(page.url || completedTab.url || ""),
+      textBytes: textResult.bytes,
+      htmlBytes: htmlResult.bytes,
+      savedTo: `${textResult.saved_to || ""} | ${htmlResult.saved_to || ""}`
+    });
+
+    return {
+      tab: completedTab,
+      pageInfo,
+      page,
+      textResult,
+      htmlResult
+    };
+  } catch (error) {
+    await appendRuntimeLog("page_inspect_failed", {
+      backendBaseUrl,
+      targetUrl,
+      error: error.message || String(error)
+    });
+    throw error;
+  }
 }
 
 async function captureCurrentPage() {
@@ -751,7 +1000,7 @@ async function captureCurrentPage() {
   const token = popupState.backendToken || "";
 
   if (!token) {
-    throw new Error("请先点击“刷新后端token”。");
+    throw new Error("请先点击\"刷新后端token\"。");
   }
 
   await appendRuntimeLog("html_capture_started", {
@@ -794,8 +1043,8 @@ async function captureCurrentPage() {
       htmlBytes: new Blob([page.html || ""]).size
     });
 
-    const textResult = await postHtmlCapture(backendBaseUrl, "text", page, tab);
-    const htmlResult = await postHtmlCapture(backendBaseUrl, "all", page, tab);
+    const textResult = await postHtmlCapture(backendBaseUrl, "text", page, tab, token);
+    const htmlResult = await postHtmlCapture(backendBaseUrl, "all", page, tab, token);
 
     await appendRuntimeLog("html_capture_sent", {
       backendBaseUrl,
@@ -866,6 +1115,100 @@ function bindPopupActions() {
           setSaveStatus(`页面内容已发送：${maskSensitiveUrl(result.page.url || result.tab.url || "")}`);
         } catch (error) {
           setSaveStatus(error.message || "页面内容提取失败。", true);
+          if (!isRequestTimeoutError(error)) {
+            console.error(error);
+          }
+        } finally {
+          button.disabled = false;
+          button.textContent = originalText;
+        }
+
+        logEvent("feature_button_clicked", {
+          featureId
+        });
+        return;
+      }
+
+      if (featureId === "3") {
+        const originalText = button.textContent;
+
+        try {
+          button.disabled = true;
+          button.textContent = "抓取中...";
+
+          const backendBaseUrl = normalizeBackendBaseUrl(backendBaseUrlInput.value);
+          const token = popupState.backendToken || "";
+
+          if (!token) {
+            throw new Error("请先点击\"刷新后端token\"。");
+          }
+
+          const targetUrl = "https://ipinfo.dkly.net/";
+          const tabs = await chrome.tabs.query({});
+          let tab = tabs.find(t => t.url && t.url.startsWith(targetUrl));
+
+          if (tab) {
+            button.textContent = "刷新页面...";
+            await chrome.tabs.reload(tab.id);
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+
+            button.textContent = "等待加载...";
+            let attempts = 0;
+            while (attempts < 20) {
+              const updatedTab = await chrome.tabs.get(tab.id);
+              if (updatedTab.status === "complete") {
+                tab = updatedTab;
+                break;
+              }
+              await new Promise((resolve) => setTimeout(resolve, 500));
+              attempts++;
+            }
+          } else {
+            button.textContent = "打开页面...";
+            tab = await chrome.tabs.create({
+              url: targetUrl,
+              active: false
+            });
+
+            button.textContent = "等待页面...";
+            await new Promise((resolve) => setTimeout(resolve, 3000));
+
+            let attempts = 0;
+            while (attempts < 20) {
+              const updatedTab = await chrome.tabs.get(tab.id);
+              if (updatedTab.status === "complete") {
+                tab = updatedTab;
+                break;
+              }
+              await new Promise((resolve) => setTimeout(resolve, 500));
+              attempts++;
+            }
+          }
+
+          button.textContent = "提取中...";
+
+          const page = await extractPageContentByScripting(tab);
+
+          button.textContent = "上传中...";
+
+          const textResult = await postHtmlCapture(backendBaseUrl, "text", page, tab, token);
+
+          await appendRuntimeLog("ip_info_captured", {
+            backendBaseUrl,
+            token,
+            rpcId: textResult.rpc_id || null,
+            city: textResult.city || null,
+            regionName: textResult.region_name || null,
+            bytes: textResult.bytes
+          });
+
+          if (textResult.city && textResult.region_name) {
+            setSaveStatus(`IP信息已保存：${textResult.region_name} / ${textResult.city}（${textResult.bytes} 字节）`);
+          } else {
+            setSaveStatus(`IP信息已保存：${textResult.bytes} 字节`);
+          }
+        } catch (error) {
+          setSaveStatus(error.message || "抓取失败。", true);
           if (!isRequestTimeoutError(error)) {
             console.error(error);
           }

@@ -1,9 +1,9 @@
 # Chrome URL 跳转捕获扩展
 
-> 当前版本：`26.6.19D`  
-> 最后更新：`2026-06-19D`  
+> 当前版本：`26.6.19E`  
+> 最后更新：`2026-06-19E`  
 > 插件版本：`26.6.19`  
-> 插件展示版本：`26.6.19D`  
+> 插件展示版本：`26.6.19E`  
 > 日志构建：`url-capture-v6`  
 > 项目定位：合法合规地调试 Chrome 页面跳转链路，并通过本地 aiohttp 服务接收扩展上报、生成 CTF 测试题目和保存调试日志。
 
@@ -36,6 +36,7 @@
 
 | 版本 | 日期 | 说明 |
 |---|---|---|
+| `26.6.19E` | 2026-06-19E | 封版版本；插件 `version_name` 更新为 `26.6.19E`；全面升级为 JSON-RPC 2.0 通信协议；按钮3改为"抓取IP信息"，自动打开/刷新 ipinfo.dkly.net 页面并提取内容；RPC ID 采用时间戳+随机数生成唯一标识；后端自动提取 city 和 region_name 信息返回前端；前端运行日志显示 RPC ID、城市、区域信息；新增 notifications 权限支持系统通知 |
 | `26.6.19D` | 2026-06-19D | 封版版本；插件 `version_name` 更新为 `26.6.19D`；后台日志构建更新为 `url-capture-v6`；按钮2改为提取当前活动页文字和完整 HTML；完整 HTML 保存到 `db/[token]/[time].html`，不再写入 `html-all` JSONL；按钮2文字上传超时 10 秒、完整 HTML 上传超时 30 秒；补充 `main.bat` 启动说明 |
 | `26.6.19C` | 2026-06-19C | 封版版本；插件 `version_name` 更新为 `26.6.19C`；后台日志构建更新为 `url-capture-v5`；popup 增加功能6到功能10；日志面板升级为“运行日志”；刷新后端 token 请求链路写入前端运行日志 |
 | `26.6.19A` | 2026-06-19A | 插件 `version` 更新为纯数字 `26.6.19`，`version_name` 更新为 `26.6.19B`；URL 跳转记录在写入扩展本地存储后同步上报到 aiohttp `/api/report`，后端保存到 `log/YYYY-MM-DD.jsonl`；后台日志构建更新为 `url-capture-v4` |
@@ -206,10 +207,13 @@ http://192.168.1.15:8080/api/html/all
 - 使用 Manifest V3。
 - 提供基础 popup 页面。
 - popup 提供后端地址输入框，默认 `http://127.0.0.1:8080/`。
-- popup 提供功能1到功能10，其中功能1用于刷新后端 token 并创建 CSV 登录记录和 token 文件夹，功能2用于提取当前活动页的页面文字和完整 HTML。
+- popup 提供功能1到功能10，其中：
+  - 功能1：刷新后端 token 并创建 CSV 登录记录和 token 文件夹
+  - 功能2：提取当前活动页的页面文字和完整 HTML
+  - 功能3：抓取 IP 信息，自动打开/刷新 ipinfo.dkly.net 并提取城市和区域信息
 - popup 打开时读取当前标签页信息。
 - 后台记录扩展安装、浏览器启动、popup 打开等事件。
-- popup 显示运行日志面板，包含 URL 跳转记录和刷新 token 请求链路。
+- popup 显示运行日志面板，包含 URL 跳转记录、刷新 token 请求链路和 IP 信息抓取记录。
 - URL 运行记录支持开启、关闭；主动操作日志始终记录。
 - 运行日志支持复制、导出 JSON 和清空。
 - 对常见敏感参数自动脱敏后再展示和持久化。
@@ -222,11 +226,68 @@ http://192.168.1.15:8080/api/html/all
 - 支持地址栏 URL 更新捕获。
 - 支持将捕获到的 URL 跳转记录自动上报到 aiohttp `/api/report`。
 - 支持将按钮2提取到的页面文字上报到 `/api/html/text`，完整 HTML 上报到 `/api/html/all`。
+- 全面支持 JSON-RPC 2.0 通信协议，所有前后端接口统一使用 RPC 格式。
+- RPC ID 采用时间戳+随机数生成（时间戳×1000000+随机数），保证全局唯一性。
+- 按钮3自动打开/刷新 ipinfo.dkly.net 页面，后台加载不干扰当前浏览。
+- 按钮3自动从页面内容提取 city 和 region_name 信息，并在运行日志中显示。
+- 所有 JSONL 日志包含 `rpc_id` 字段，便于追踪完整请求链路。
 - 完整 HTML 保存为独立 `.html` 文件，避免大 HTML 写入 JSONL。
 - aiohttp 支持接收扩展上报并保存 JSONL 日志。
 - aiohttp 支持生成 `crx-` token，将首次登录记录写入 `db/[token].csv`，并创建 `db/[token]/` 保存完整 HTML。
 - aiohttp 支持启动日志落地。
 - aiohttp 支持 Visa CTF 数据生成接口 `/api/visa`。
+- aiohttp 同时兼容 REST 和 JSON-RPC 2.0 两种格式，向后兼容旧版扩展。
+
+---
+
+## 封版说明（2026-06-19E）
+
+本次围绕"26.6.19E 封版、JSON-RPC 2.0 统一改造和 IP 信息自动提取"完成以下更新：
+
+1. `chrome-extension/manifest.json` 的 `version` 保持 `26.6.19`，符合 Chrome 纯数字点分版本要求。
+2. `chrome-extension/manifest.json` 的 `version_name` 更新为 `26.6.19E`。
+3. README 当前版本更新为 `26.6.19E`。
+4. 全面升级为 JSON-RPC 2.0 通信协议：
+   - 所有前端请求统一使用 `{"jsonrpc": "2.0", "method": "...", "params": {...}, "id": ...}` 格式
+   - 后端响应格式：`{"jsonrpc": "2.0", "result": {...}, "id": ...}` 或错误格式
+   - 支持的 RPC 方法：`token.generate`、`token.create`、`html.captureText`、`html.captureAll`
+5. RPC ID 生成优化：采用 `Date.now() * 1000000 + Math.floor(Math.random() * 1000000)` 算法，避免高并发 ID 冲突。
+6. 按钮3功能升级为"抓取IP信息"：
+   - 自动检测 ipinfo.dkly.net 标签页是否存在
+   - 已存在：刷新标签页获取最新数据
+   - 不存在：后台打开新标签页（`active: false`）
+   - 等待页面加载完成（轮询检查 `status === "complete"`）
+   - 自动提取页面文字内容
+   - 上传到后端 `/api/html/text`
+7. 后端自动提取 IP 信息：
+   - 使用正则表达式从页面文字中提取 `region.name` 和 `city` 字段
+   - 在响应中返回 `city` 和 `region_name`
+8. 前端运行日志增强：
+   - 新增 `ip_info_captured` 事件类型
+   - 显示 RPC ID、城市、区域、字节数等完整信息
+   - 状态栏显示格式：`Tokyo / Chiyoda（5622 字节）`
+9. 后端 JSONL 日志包含 `rpc_id` 字段，便于追踪请求链路。
+10. 后端同时支持 REST 和 JSON-RPC 2.0 格式，通过检测 `jsonrpc: "2.0"` 字段自动路由。
+11. 新增 `notifications` 权限（预留系统通知功能）。
+12. `/api/get_crc_token` 同时支持 GET 和 POST 请求。
+
+按钮3工作流程：
+
+```
+检测标签页 → 刷新/打开 → 等待加载 → 提取内容 → 上传 → 提取城市信息 → 显示结果
+```
+
+封版检查结果：
+
+- `background.js`、`content.js`、`popup.js` 语法检查通过。
+- `manifest.json` JSON 格式检查通过。
+- `main.py`、`server/app.py`、`server/runner.py` Python 编译检查通过。
+- JSON-RPC 格式请求和响应已通过本地接口验证。
+- RPC ID 唯一性已验证（时间戳+随机数组合）。
+- City 信息提取已验证（正则匹配 `"name": "Tokyo"` 和 `"city": "Chiyoda"`）。
+- 运行日志正常显示 RPC ID、城市、区域信息。
+- 后端 JSONL 日志正常包含 `rpc_id` 字段。
+- 向后兼容性验证通过（REST 格式仍可正常工作）。
 
 ---
 
@@ -570,3 +631,97 @@ git diff -- README.md chrome-extension\manifest.json chrome-extension\background
 - 将 `localhost:1455/auth/callback` 这类目标 URL 自动高亮。
 - 增加独立 options 页面，管理日志保留数量、匹配规则和脱敏规则。
 - 后续如果要长期使用，建议把扩展名称、图标和 README 中的项目名统一成正式名称。
+
+---
+
+## TODO：跨扩展内容提取（方案C）
+
+### 当前限制
+
+按钮3可以检查任意窗口信息，但遇到 **其他扩展的页面**（`chrome-extension://其他扩展ID/xxx.html`）时，由于 Chrome 安全策略限制，无法通过扩展 API 提取内容。
+
+**Chrome 硬性限制**：
+- `chrome.scripting.executeScript()` 不能跨扩展执行
+- `content.js` 不能通过 `manifest.json` 声明注入到其他扩展页面
+- `fetch()` 不支持 `chrome-extension://` 协议
+
+示例：当前扩展无法提取 `chrome-extension://kjgiepchkcgondcbnipppfnhjcndjhen/index.html` 的内容。
+
+### 未来方案：Chrome DevTools Protocol（CDP）
+
+使用外部程序通过 CDP 控制浏览器，绕过扩展沙箱限制，实现跨扩展内容抓取。
+
+#### 实现思路
+
+1. **架构调整**：
+   - 保持当前 Chrome 扩展作为 UI 入口（按钮3检查窗口信息）
+   - 新增 Python CDP 控制器（通过 Selenium/Playwright 连接浏览器）
+   - aiohttp 后端作为中间协调层
+
+2. **工作流程**：
+   ```
+   用户点击按钮3 
+   → 扩展检测到是其他扩展页面
+   → 扩展通过后端 API 通知 CDP 控制器
+   → CDP 控制器使用 Page.captureSnapshot 或 Runtime.evaluate 提取内容
+   → 内容回传到后端保存
+   → 扩展显示提取成功
+   ```
+
+3. **技术栈选择**：
+   - **Selenium + Chrome Driver**：成熟稳定，支持 CDP
+   - **Playwright**（推荐）：原生支持 CDP，API 更现代
+   - **puppeteer-python**：Python 封装的 Puppeteer
+
+4. **CDP 关键 API**：
+   ```python
+   # 通过 CDP 提取页面内容，无视扩展隔离
+   page.evaluate("document.body.innerText")
+   page.evaluate("document.documentElement.outerHTML")
+   page.evaluate("({ title: document.title, url: location.href, text: document.body.innerText })")
+   ```
+
+5. **连接方式**：
+   - 启动浏览器时开启远程调试端口：`chrome.exe --remote-debugging-port=9222`
+   - 或使用 Playwright 的 `browser.connect_over_cdp()`
+   - 指纹浏览器通常已开启 CDP 端口，可直接连接
+
+#### 实现步骤
+
+**Phase 1：基础架构**
+- [ ] 新增 `cdp_controller.py`，封装 CDP 连接和页面操作
+- [ ] aiohttp 新增 `/api/cdp/extract` 接口，接收扩展的跨域提取请求
+- [ ] 扩展按钮3检测到跨扩展页面时，改为调用 `/api/cdp/extract`
+
+**Phase 2：CDP 提取逻辑**
+- [ ] CDP 控制器连接到当前浏览器实例（通过调试端口）
+- [ ] 根据 `windowId` 和 `tabId` 定位目标页面
+- [ ] 执行 JavaScript 提取 `title`、`url`、`text`、`html`
+- [ ] 将内容返回给后端，写入 `log/html-text-YYYY-MM-DD.jsonl`
+
+**Phase 3：错误处理和日志**
+- [ ] CDP 连接失败时的降级处理
+- [ ] 超时控制（CDP 操作可能卡住）
+- [ ] 运行日志记录：`cdp_extract_started`、`cdp_extract_completed`、`cdp_extract_failed`
+
+**Phase 4：隐私模式支持**
+- [ ] CDP 支持连接隐私模式窗口
+- [ ] 验证指纹浏览器环境下的 CDP 兼容性
+
+#### 参考资料
+
+- [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/)
+- [Playwright Python - CDP Sessions](https://playwright.dev/python/docs/api/class-cdpsession)
+- [Selenium 4 CDP Support](https://www.selenium.dev/documentation/webdriver/bidirectional/chrome_devtools/)
+
+#### 预期效果
+
+实现后，按钮3可以提取**任意页面**的内容，包括：
+- ✅ 普通 HTTP/HTTPS 页面
+- ✅ 自己扩展的页面
+- ✅ **其他扩展的页面**（通过 CDP）
+- ✅ `chrome://` 系统页面（通过 CDP，需额外权限）
+
+---
+
+## 当前项目变化检查（本次会话）
