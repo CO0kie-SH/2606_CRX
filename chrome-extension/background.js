@@ -1,7 +1,9 @@
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
-const LOGGER_BUILD = "url-capture-v3";
+const EXTENSION_VERSION_NAME = chrome.runtime.getManifest().version_name || EXTENSION_VERSION;
+const LOGGER_BUILD = "url-capture-v6";
 const REDACTED_VALUE = "[REDACTED]";
 const DEFAULT_BACKEND_BASE_URL = "http://127.0.0.1:8080/";
+const DEFAULT_REQUEST_TIMEOUT_MS = 3000;
 const BACKEND_BASE_URL_STORAGE_KEY = "settings.backendBaseUrl";
 const URL_LOGGER_SETTINGS_KEY = "urlLogger.settings";
 const URL_LOGGER_LOGS_KEY = "urlLogger.global.logs";
@@ -84,14 +86,16 @@ function writeLog(eventName, details = {}) {
   const logEntry = {
     time: new Date().toISOString(),
     extensionVersion: EXTENSION_VERSION,
+    extensionVersionName: EXTENSION_VERSION_NAME,
     loggerBuild: LOGGER_BUILD,
     eventName,
     ...details
   };
 
-  console.groupCollapsed(`[My Extension v${EXTENSION_VERSION} ${LOGGER_BUILD}] ${eventName} ${logEntry.time}`);
+  console.groupCollapsed(`[My Extension v${EXTENSION_VERSION_NAME} ${LOGGER_BUILD}] ${eventName} ${logEntry.time}`);
   console.log("time:", logEntry.time);
   console.log("extensionVersion:", logEntry.extensionVersion);
+  console.log("extensionVersionName:", logEntry.extensionVersionName);
   console.log("loggerBuild:", logEntry.loggerBuild);
   console.log("eventName:", logEntry.eventName);
 
@@ -113,6 +117,28 @@ function getLocalTime() {
   return new Date().toLocaleString();
 }
 
+async function fetchWithTimeout(targetUrl, options = {}, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    return await fetch(targetUrl, {
+      ...options,
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`Request timed out after ${timeoutMs}ms.`);
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 async function getBackendBaseUrl() {
   const result = await chrome.storage.local.get(BACKEND_BASE_URL_STORAGE_KEY);
   const value = String(result[BACKEND_BASE_URL_STORAGE_KEY] || DEFAULT_BACKEND_BASE_URL).trim() || DEFAULT_BACKEND_BASE_URL;
@@ -125,57 +151,56 @@ async function getBackendBaseUrl() {
   }
 }
 
+async function postExtensionEventReport(eventName, details = {}) {
+  const backendBaseUrl = await getBackendBaseUrl();
+  const targetUrl = new URL("api/report", backendBaseUrl).toString();
+  const manifest = chrome.runtime.getManifest();
+  const payload = {
+    event_name: eventName,
+    time: new Date().toISOString(),
+    extension_version: EXTENSION_VERSION,
+    logger_build: LOGGER_BUILD,
+    backend_base_url: backendBaseUrl,
+    details: {
+      extension_id: chrome.runtime.id,
+      extension_name: manifest.name || "",
+      extension_version_name: EXTENSION_VERSION_NAME,
+      ...details
+    }
+  };
+
+  const response = await fetchWithTimeout(targetUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  if (!response.ok) {
+    const responseText = await response.text();
+    throw new Error(`HTTP ${response.status}: ${responseText}`);
+  }
+
+  return {
+    ok: true,
+    targetUrl
+  };
+}
+
 async function postExtensionLoadReport(trigger, reason) {
   try {
-    const backendBaseUrl = await getBackendBaseUrl();
-    const targetUrl = new URL("api/report", backendBaseUrl).toString();
-    const manifest = chrome.runtime.getManifest();
-    const payload = {
-      event_name: "extension_loaded",
-      time: new Date().toISOString(),
-      extension_version: EXTENSION_VERSION,
-      logger_build: LOGGER_BUILD,
-      backend_base_url: backendBaseUrl,
-      details: {
-        trigger,
-        reason,
-        extension_id: chrome.runtime.id,
-        extension_name: manifest.name || ""
-      }
-    };
-    const response = await fetch(targetUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(payload)
+    const result = await postExtensionEventReport("extension_loaded", {
+      trigger,
+      reason
     });
-
-    if (!response.ok) {
-      const responseText = await response.text();
-      writeLog("extension_load_report_failed", {
-        trigger,
-        reason,
-        targetUrl,
-        status: response.status,
-        responseText
-      });
-      return {
-        ok: false,
-        error: `HTTP ${response.status}`,
-        targetUrl
-      };
-    }
 
     writeLog("extension_load_report_sent", {
       trigger,
       reason,
-      targetUrl
+      targetUrl: result.targetUrl
     });
-    return {
-      ok: true,
-      targetUrl
-    };
+    return result;
   } catch (error) {
     writeLog("extension_load_report_failed", {
       trigger,
@@ -186,6 +211,28 @@ async function postExtensionLoadReport(trigger, reason) {
       ok: false,
       error: String(error)
     };
+  }
+}
+
+async function postNavigationReport(navigation, entry) {
+  try {
+    const result = await postExtensionEventReport("url_jump_recorded", {
+      tabContext: {
+        tabId: entry.tabId ?? null,
+        windowId: entry.windowId ?? null
+      },
+      navigation
+    });
+
+    writeLog("url_jump_report_sent", {
+      targetUrl: result.targetUrl,
+      navigation
+    });
+  } catch (error) {
+    writeLog("url_jump_report_failed", {
+      error: String(error),
+      navigation
+    });
   }
 }
 
@@ -293,6 +340,8 @@ async function appendNavigationLog(entry) {
   chrome.runtime.sendMessage({ type: "URL_LOG_UPDATED" }, () => {
     void chrome.runtime.lastError;
   });
+
+  void postNavigationReport(navigation, entry);
 }
 
 function recordNavigationAttempt(source, details) {

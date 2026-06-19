@@ -54,5 +54,22 @@
   wrapHistoryMethod("pushState");
   wrapHistoryMethod("replaceState");
 
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type !== "EXTRACT_PAGE_CONTENT") {
+      return false;
+    }
+
+    sendResponse({
+      ok: true,
+      page: {
+        title: document.title || "",
+        url: window.location.href,
+        text: document.body?.innerText || "",
+        html: document.documentElement?.outerHTML || ""
+      }
+    });
+    return true;
+  });
+
   recordUrl("page_loaded");
 })();

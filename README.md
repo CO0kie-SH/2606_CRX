@@ -1,8 +1,10 @@
 # Chrome URL 跳转捕获扩展
 
-> 当前版本：`1.1.2-dev`  
-> 最后更新：`2026-06-16A`  
-> 日志构建：`url-capture-v3`  
+> 当前版本：`26.6.19D`  
+> 最后更新：`2026-06-19D`  
+> 插件版本：`26.6.19`  
+> 插件展示版本：`26.6.19D`  
+> 日志构建：`url-capture-v6`  
 > 项目定位：合法合规地调试 Chrome 页面跳转链路，并通过本地 aiohttp 服务接收扩展上报、生成 CTF 测试题目和保存调试日志。
 
 ---
@@ -13,13 +15,14 @@
 
 当前重点不是自动化绕过浏览器限制，而是把跳转链路看清楚、记录下来、方便复现：
 
-- 在扩展 popup 主页面展示 URL 跳转记录
+- 在扩展 popup 主页面展示运行日志，包含 URL 跳转记录和前端主动操作记录
 - 通过 popup 开关控制是否记录 URL 变化，默认开启
-- 在 popup 日志框内输出脱敏后的完整 URL
+- 在 popup 运行日志框内输出脱敏后的完整 URL 和刷新 token 请求链路
 - 使用后台 `service worker` 记录结构化日志
 - 记录 popup 打开时的当前页面信息
 - 监听地址栏变化、主框架导航、请求发出前和导航错误事件
 - 尽量捕获一闪而过、随后被拦截或重定向的中间 URL
+- 通过按钮2提取当前活动页的页面文字和完整 HTML
 - 通过 aiohttp 的 `/api/report` 接收扩展上报，并写入 `log/YYYY-MM-DD.jsonl`
 - Python 运行日志写入 `log/runtime-YYYY-MM-DD.log`
 
@@ -33,6 +36,9 @@
 
 | 版本 | 日期 | 说明 |
 |---|---|---|
+| `26.6.19D` | 2026-06-19D | 封版版本；插件 `version_name` 更新为 `26.6.19D`；后台日志构建更新为 `url-capture-v6`；按钮2改为提取当前活动页文字和完整 HTML；完整 HTML 保存到 `db/[token]/[time].html`，不再写入 `html-all` JSONL；按钮2文字上传超时 10 秒、完整 HTML 上传超时 30 秒；补充 `main.bat` 启动说明 |
+| `26.6.19C` | 2026-06-19C | 封版版本；插件 `version_name` 更新为 `26.6.19C`；后台日志构建更新为 `url-capture-v5`；popup 增加功能6到功能10；日志面板升级为“运行日志”；刷新后端 token 请求链路写入前端运行日志 |
+| `26.6.19A` | 2026-06-19A | 插件 `version` 更新为纯数字 `26.6.19`，`version_name` 更新为 `26.6.19B`；URL 跳转记录在写入扩展本地存储后同步上报到 aiohttp `/api/report`，后端保存到 `log/YYYY-MM-DD.jsonl`；后台日志构建更新为 `url-capture-v4` |
 | `1.1.2-dev` | 2026-06-16A | 新增 aiohttp `/api/log` 与 `/api/report` 上报接口；Python 启动日志落地到 `log/runtime-YYYY-MM-DD.log`；popup 功能1可向后端发送测试上报；URL 记录面板迁移到 popup；补充指纹浏览器使用局域网 IP 的连接方式 |
 | `1.1.1` | 2026-06-12 | 新增敏感参数自动脱敏；浮窗新增“复制”和“导出 JSON”；popup 当前页面 URL 同步脱敏；后台日志构建更新为 `url-capture-v3` |
 | `1.1.0` | 2026-06-04 | 新增页面内 URL 记录浮窗；新增 `storage`、`tabs`、`webNavigation`、`webRequest` 捕获链路；后台日志加入 `extensionVersion` 和 `loggerBuild`；可捕获 `localhost` OAuth 回调这类中间 URL |
@@ -40,7 +46,7 @@
 
 重要功能变更时建议同步更新：
 
-- `manifest.json` 中的 `version`
+- `manifest.json` 中的 `version` 和 `version_name`
 - `background.js` 中的 `LOGGER_BUILD`
 - README 中的当前版本和版本表
 
@@ -66,11 +72,13 @@
 2606_CRX/
 ├── README.md
 ├── main.py                    # aiohttp 服务启动入口，启动日志写入 log/runtime-YYYY-MM-DD.log
+├── main.bat                   # Windows 一键启动脚本，创建 db/log 并以 0.0.0.0:8080 启动后端
 ├── server/
 │   ├── app.py                 # HTTP 路由、Visa 题目接口、扩展日志上报接口
 │   └── runner.py              # aiohttp host/port 参数
 ├── static/                    # 本地 CTF Dashboard
 ├── log/                       # 运行日志和扩展上报日志
+├── db/                        # 后端 token CSV 登录记录
 └── chrome-extension/
     ├── manifest.json           # Chrome 扩展配置
     ├── background.js           # 后台 service worker，负责捕获导航和结构化日志
@@ -95,17 +103,17 @@
 1. Chrome 加载 `chrome-extension/`。
 2. 启动 aiohttp 服务。
 3. 在 popup 的“前后端交互地址”输入框保存后端地址。
-4. URL 记录默认开启，可在 popup 中查看、复制、导出或清空。
-5. 点击“功能1”可向后端发送一条测试上报。
+4. 运行日志默认展示，可在 popup 中查看、复制、导出或清空。
+5. 点击“刷新后端token”可向后端申请 token，并创建 `db/[token].csv` 登录记录。
 6. 在 `log/YYYY-MM-DD.jsonl` 查看扩展上报记录。
 7. 在 Service Worker Console 查看更完整的结构化日志。
 
 默认安全策略：
 
-- URL 记录默认开启，可在 popup 手动关闭。
-- 日志默认保存在本机 `chrome.storage.local`。
-- URL 跳转记录最多保留最近 `300` 条。
-- 只有功能1或扩展加载上报会发送到已保存的后端地址。
+- URL 运行记录默认开启，可在 popup 手动关闭；刷新 token 这类主动操作日志始终记录。
+- 运行日志默认保存在本机 `chrome.storage.local`。
+- 运行日志最多保留最近 `300` 条。
+- 刷新后端 token、扩展加载上报和 URL 跳转记录会发送到已保存的后端地址。
 
 ---
 
@@ -116,6 +124,20 @@
 ```powershell
 D:\0Code2\py312\python.exe
 ```
+
+Windows 推荐直接使用项目根目录下的启动脚本：
+
+```powershell
+.\main.bat
+```
+
+`main.bat` 会执行这些准备动作：
+
+- 切换到脚本所在项目目录。
+- 创建 `db/` 和 `log/` 目录。
+- 设置 `PYTHONIOENCODING=utf-8`，减少中文日志乱码。
+- 将 `D:\0Code2\py312`、`D:\job\py312\Scripts` 和 `D:\job\py312` 加入当前窗口的 `PATH`。
+- 执行 `python main.py --host 0.0.0.0 --port 8080 %*`，并透传额外命令行参数。
 
 普通浏览器可使用默认本机地址：
 
@@ -141,11 +163,21 @@ D:\0Code2\py312\python.exe main.py --host 0.0.0.0 --port 8080
 http://192.168.1.15:8080/
 ```
 
-已验证功能1成功上报到：
+“刷新后端token”会依次请求：
 
 ```text
-http://192.168.1.15:8080/api/report
+http://192.168.1.15:8080/api/get_crc_token
+http://192.168.1.15:8080/api/token/create
 ```
+
+按钮2会把当前活动页内容发送到：
+
+```text
+http://192.168.1.15:8080/api/html/text
+http://192.168.1.15:8080/api/html/all
+```
+
+其中页面文字写入 `log/html-text-YYYY-MM-DD.jsonl`；完整 HTML 保存到 `db/[token]/[time].html`，不会再写入 `html-all` JSONL。按钮2上传文字超时为 10 秒，上传完整 HTML 超时为 30 秒；其它普通后端请求默认仍是 3 秒超时。
 
 日志文件：
 
@@ -160,6 +192,10 @@ http://192.168.1.15:8080/api/report
 |---|---|---|
 | `GET` | `/api/status` | Dashboard 状态 |
 | `GET` | `/api/visa` | 随机生成一组 Visa CTF 测试数据 |
+| `GET` | `/api/get_crc_token` | 生成 `crx-` + 32 位 hex token |
+| `POST` | `/api/token/create` | 用 token 和全部标签页快照创建 `db/[token].csv` |
+| `POST` | `/api/html/text` | 接收按钮2提取的页面正文文字，写入 `log/html-text-YYYY-MM-DD.jsonl` |
+| `POST` | `/api/html/all` | 接收按钮2提取的完整页面 HTML，保存到 `db/[token]/[time].html` |
 | `POST` | `/api/log` | 扩展日志上报原始路径 |
 | `POST` | `/api/report` | 扩展日志上报推荐路径，避免部分浏览器拦截 `/api/log` |
 
@@ -170,12 +206,12 @@ http://192.168.1.15:8080/api/report
 - 使用 Manifest V3。
 - 提供基础 popup 页面。
 - popup 提供后端地址输入框，默认 `http://127.0.0.1:8080/`。
-- popup 提供功能1到功能5，其中功能1用于发送测试上报。
+- popup 提供功能1到功能10，其中功能1用于刷新后端 token 并创建 CSV 登录记录和 token 文件夹，功能2用于提取当前活动页的页面文字和完整 HTML。
 - popup 打开时读取当前标签页信息。
 - 后台记录扩展安装、浏览器启动、popup 打开等事件。
-- popup 显示 URL 跳转记录面板。
-- URL 记录支持开启、关闭和清空日志。
-- URL 记录支持复制当前日志和导出 JSON。
+- popup 显示运行日志面板，包含 URL 跳转记录和刷新 token 请求链路。
+- URL 运行记录支持开启、关闭；主动操作日志始终记录。
+- 运行日志支持复制、导出 JSON 和清空。
 - 对常见敏感参数自动脱敏后再展示和持久化。
 - 支持普通页面跳转记录。
 - 支持 SPA 地址变化记录。
@@ -184,11 +220,83 @@ http://192.168.1.15:8080/api/report
 - 支持主页面请求发出前 URL 捕获。
 - 支持导航错误 URL 捕获。
 - 支持地址栏 URL 更新捕获。
+- 支持将捕获到的 URL 跳转记录自动上报到 aiohttp `/api/report`。
+- 支持将按钮2提取到的页面文字上报到 `/api/html/text`，完整 HTML 上报到 `/api/html/all`。
+- 完整 HTML 保存为独立 `.html` 文件，避免大 HTML 写入 JSONL。
 - aiohttp 支持接收扩展上报并保存 JSONL 日志。
+- aiohttp 支持生成 `crx-` token，将首次登录记录写入 `db/[token].csv`，并创建 `db/[token]/` 保存完整 HTML。
 - aiohttp 支持启动日志落地。
 - aiohttp 支持 Visa CTF 数据生成接口 `/api/visa`。
 
 ---
+
+## 封版说明（2026-06-19D）
+
+本次围绕“26.6.19D 封版、按钮2页面内容保存和启动脚本文档化”完成以下更新：
+
+1. `chrome-extension/manifest.json` 的 `version` 保持 `26.6.19`，符合 Chrome 纯数字点分版本要求。
+2. `chrome-extension/manifest.json` 的 `version_name` 更新为 `26.6.19D`。
+3. README 当前版本更新为 `26.6.19D`。
+4. 后台日志构建更新为 `url-capture-v6`。
+5. 后台 Console 标题改为展示 `version_name`，例如 `26.6.19D`，方便观察封版日志。
+6. 按钮2确认改为提取当前活动页内容，包括页面正文文字和完整 HTML。
+7. 按钮2上传时会携带按钮1刷新后保存的后端 token；未刷新 token 时会提示先刷新。
+8. `/api/token/create` 创建 `db/[token].csv` 时同步创建 `db/[token]/` 文件夹。
+9. `/api/html/all` 不再写入 `html-all-YYYY-MM-DD.jsonl`，而是把完整 HTML 保存到 `db/[token]/[time].html`。
+10. `/api/html/text` 继续写入 `log/html-text-YYYY-MM-DD.jsonl`，便于观察小体积正文。
+11. 按钮2页面文字上传超时为 10 秒，完整 HTML 上传超时为 30 秒；其它普通请求默认仍为 3 秒。
+12. 新增 `main.bat` 文档说明：脚本会创建 `db/`、`log/`，设置 UTF-8，并以 `0.0.0.0:8080` 启动后端。
+
+封版检查结果：
+
+- `background.js`、`content.js`、`popup.js` 语法检查通过。
+- `manifest.json` JSON 格式检查通过。
+- `main.py`、`server/app.py`、`server/runner.py` Python 编译检查通过。
+- `/api/get_crc_token`、`/api/token/create`、`/api/html/text`、`/api/html/all` 行为已通过本地接口验证。
+- 完整 HTML 已验证保存为 `db/[token]/[time].html`，且 `html-all` JSONL 不再增长。
+- 当前工作树中 `visa_card_gen.py` 处于删除状态，因此本次封版未将它纳入 Python 编译检查；对应 `/api/visa` 在缺少该文件时会按现有逻辑返回 404。
+
+## 封版说明（2026-06-19C）
+
+本次围绕“26.6.19C 封版、运行日志观察和后端 token 刷新链路”完成以下更新：
+
+1. `chrome-extension/manifest.json` 的 `version` 更新为 `26.6.19`，保持 Chrome 要求的纯数字点分格式。
+2. `chrome-extension/manifest.json` 新增/更新 `version_name` 为 `26.6.19C`，用于展示带字母的版本名。
+3. README 当前版本更新为 `26.6.19C`。
+4. 后台日志构建更新为 `url-capture-v5`。
+5. `background.js` 在 URL 跳转记录写入 `chrome.storage.local` 后，会异步 POST 到 `/api/report`。
+6. URL 上报沿用已有 `/api/report` JSON 格式，后端继续写入 `log/YYYY-MM-DD.jsonl`。
+7. URL 上报失败只记录到扩展 Service Worker Console，不影响本地 popup 日志展示。
+8. popup 功能1改名为“刷新后端token”。
+9. 新增 `GET /api/get_crc_token`，生成 `crx-` + 32 位 hex token。
+10. 新增 `POST /api/token/create`，用 token 和全部标签页快照创建 `db/[token].csv`。
+11. token CSV 第一行为表头，第二行为“登录成功”记录，包含 ISO UTC 时间、UA、remote 和窗口快照 JSON。
+12. 如果 token CSV 已存在，后端返回 `400`，不覆盖旧文件。
+13. 创建 token CSV 时同步创建 `db/[token]/` 文件夹，供按钮2保存完整 HTML。
+14. popup 功能区新增第二排按钮，提供功能6到功能10，占位行为沿用功能2到功能5。
+15. popup “网页跳转记录”面板升级为“运行日志”，原 URL 跳转记录格式保持不变。
+16. 刷新后端 token 的前端链路会写入运行日志，包括 `token_refresh_started`、`token_requested`、`tabs_snapshot_collected`、`token_create_succeeded`、`token_create_failed` 和 `token_refresh_failed`。
+17. 运行日志导出文件名更新为 `runtime-log-*.json`。
+
+封版检查结果：
+
+- `log/2026-06-19.jsonl` 可正常逐行解析，当前未发现坏 JSON 行。
+- `log/runtime-2026-06-19.log` 未发现 `ERROR`、`CRITICAL`、`Traceback` 或异常堆栈。
+- 现有 `db/crx-*.csv` 均为两行结构：表头 + 登录成功记录，窗口快照 JSON 可解析。
+- 本地接口验证确认 `/api/get_crc_token`、`/api/token/create` 和重复 token 返回 `400` 行为正常。
+- 注意：如果 JSONL 中仍看到 `logger_build=url-capture-v4`，说明浏览器仍在运行旧 service worker；在 `chrome://extensions/` 刷新扩展后，应看到 `logger_build=url-capture-v5`。
+
+## 今日任务梳理（2026-06-19A）
+
+本次围绕“版本同步和 URL 跳转记录后端落盘”完成以下更新：
+
+1. `chrome-extension/manifest.json` 的 `version` 更新为 `26.6.19`，保持 Chrome 要求的纯数字点分格式。
+2. `chrome-extension/manifest.json` 新增/更新 `version_name` 为 `26.6.19B`，用于展示带字母的版本名。
+3. README 当前版本更新为 `26.6.19A`。
+4. 后台日志构建更新为 `url-capture-v4`。
+5. `background.js` 在 URL 跳转记录写入 `chrome.storage.local` 后，会异步 POST 到 `/api/report`。
+6. URL 上报沿用已有 `/api/report` JSON 格式，后端继续写入 `log/YYYY-MM-DD.jsonl`。
+7. URL 上报失败只记录到扩展 Service Worker Console，不影响本地 popup 日志展示。
 
 ## 今日任务梳理（2026-06-16A）
 
@@ -258,8 +366,8 @@ reason: tabs.onUpdated.url
 ```json
 {
   "time": "2026-06-04T08:55:32.637Z",
-  "extensionVersion": "1.1.1",
-  "loggerBuild": "url-capture-v3",
+  "extensionVersion": "26.6.19",
+  "loggerBuild": "url-capture-v6",
   "eventName": "url_jump_recorded",
   "tabContext": {
     "tabId": 1534284702
@@ -316,7 +424,7 @@ https://getip.morelogin.com/black_whiteList_stop_page.html
 当前版本日志标题格式：
 
 ```text
-[My Extension v1.1.1 url-capture-v3] url_jump_recorded 2026-...
+[My Extension v26.6.19D url-capture-v6] url_jump_recorded 2026-...
 ```
 
 如果仍然看到旧格式：
@@ -338,6 +446,7 @@ https://getip.morelogin.com/black_whiteList_stop_page.html
 | `activeTab` | popup 中读取当前活动标签页信息 |
 | `storage` | 保存后端地址、URL 记录状态和 URL 日志 |
 | `tabs` | 监听标签页地址栏 URL 更新 |
+| `scripting` | 按钮2在当前活动页执行脚本，提取页面文字和完整 HTML |
 | `webNavigation` | 监听 Chrome 导航阶段 |
 | `webRequest` | 监听主页面请求发出前的 URL |
 | `host_permissions` | 允许在 `http://*/*` 和 `https://*/*` 页面注入脚本并监听请求 |
@@ -371,8 +480,10 @@ https://getip.morelogin.com/black_whiteList_stop_page.html
 ### 3) popup 控制层：popup.js
 
 - 管理后端地址输入框和保存按钮
-- 展示、复制、导出、清空 URL 记录
-- 功能1向 `/api/report` 发送测试上报
+- 展示、复制、导出、清空运行日志
+- 功能1向 `/api/get_crc_token` 申请 token，再向 `/api/token/create` 创建 CSV 登录记录
+- 功能2提取当前活动页的页面正文文字和完整 HTML，并分别发送到 `/api/html/text` 与 `/api/html/all`
+- 功能6到功能10为预留按钮，当前使用占位点击提示
 - 读取当前活动标签页
 - 输出当前页面标题、URL、域名、tab ID、窗口 ID 等信息
 - 将 popup 打开事件发送给后台日志
@@ -424,6 +535,10 @@ Get-Content -Raw .\chrome-extension\manifest.json | ConvertFrom-Json | Out-Null
 - `content.js` 语法检查通过
 - `popup.js` 语法检查通过
 - `manifest.json` JSON 格式检查通过
+- `main.py`、`server/app.py`、`server/runner.py` Python 编译检查通过
+- `/api/get_crc_token`、`/api/token/create` 接口行为验证通过
+- 重复 token 返回 `400` 且不会覆盖已存在 CSV
+- `/api/html/text`、`/api/html/all` 接口行为验证通过，其中完整 HTML 保存为 `db/[token]/[time].html`
 - 实测已捕获 `webNavigation.onBeforeNavigate` 来源的 `localhost` 回调中间 URL
 
 ---
@@ -433,11 +548,12 @@ Get-Content -Raw .\chrome-extension\manifest.json | ConvertFrom-Json | Out-Null
 本次会话主要变更集中在：
 
 - `README.md`：项目说明文档
-- `chrome-extension/manifest.json`：版本为 `1.1.1`，包含导航捕获所需权限
+- `chrome-extension/manifest.json`：版本为 `26.6.19`，展示版本为 `26.6.19D`，包含导航捕获所需权限
 - `chrome-extension/background.js`：负责后台日志、导航捕获、版本输出和加载上报
 - `chrome-extension/content.js`：负责页面内 URL 变化采集
-- `chrome-extension/popup.js`：负责地址配置、功能按钮、URL 记录展示和手动上报
-- `server/app.py`：负责 Dashboard、Visa 题目接口和扩展上报接口
+- `chrome-extension/popup.html`：负责 popup 布局、功能1到功能10和运行日志面板
+- `chrome-extension/popup.js`：负责地址配置、功能按钮、运行日志展示、刷新 token、CSV 创建请求和页面内容提取上报
+- `server/app.py`：负责 Dashboard、Visa 题目接口、扩展上报接口、token 生成、CSV 创建接口和页面内容接收接口
 - `main.py`：负责初始化控制台和文件日志
 
 如需后续做版本提交，建议先检查：

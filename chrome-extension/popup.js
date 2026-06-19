@@ -1,4 +1,5 @@
 const messageElement = document.getElementById("message");
+const manifest = chrome.runtime.getManifest();
 const backendBaseUrlInput = document.getElementById("backend-base-url");
 const saveBackendUrlButton = document.getElementById("save-backend-url");
 const saveStatusElement = document.getElementById("save-status");
@@ -11,9 +12,14 @@ const urlLoggerExportButton = document.getElementById("url-logger-export");
 const urlLoggerClearButton = document.getElementById("url-logger-clear");
 const REDACTED_VALUE = "[REDACTED]";
 const DEFAULT_BACKEND_BASE_URL = "http://127.0.0.1:8080/";
+const DEFAULT_REQUEST_TIMEOUT_MS = 3000;
+const HTML_TEXT_UPLOAD_TIMEOUT_MS = 10000;
+const HTML_FULL_UPLOAD_TIMEOUT_MS = 30000;
 const BACKEND_BASE_URL_STORAGE_KEY = "settings.backendBaseUrl";
+const BACKEND_TOKEN_STORAGE_KEY = "settings.backendToken";
 const URL_LOGGER_SETTINGS_KEY = "urlLogger.settings";
 const URL_LOGGER_LOGS_KEY = "urlLogger.global.logs";
+const MAX_RUNTIME_LOGS = 300;
 const SENSITIVE_PARAM_NAMES = new Set([
   "access_token",
   "auth",
@@ -32,7 +38,9 @@ const SENSITIVE_PARAM_NAMES = new Set([
 ]);
 const popupState = {
   urlLoggerEnabled: true,
-  urlLogs: []
+  urlLogs: [],
+  currentPageTab: null,
+  backendToken: ""
 };
 
 function shouldRedactParam(name) {
@@ -142,6 +150,62 @@ function setUrlLoggerStatus(text, isError = false) {
   urlLoggerStatusElement.style.color = isError ? "#b91c1c" : "#444";
 }
 
+function getLocalLogTime() {
+  return new Date().toISOString();
+}
+
+function createRequestTimeoutError(timeoutMs) {
+  const error = new Error(`请求超时（${timeoutMs / 1000}秒），请确认后端服务已启动。`);
+  error.name = "RequestTimeoutError";
+  return error;
+}
+
+function isRequestTimeoutError(error) {
+  return error?.name === "RequestTimeoutError";
+}
+
+async function fetchWithTimeout(targetUrl, options = {}, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    return await fetch(targetUrl, {
+      ...options,
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw createRequestTimeoutError(timeoutMs);
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function requestJson(targetUrl, options = {}, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS) {
+  const response = await fetchWithTimeout(targetUrl, options, timeoutMs);
+  const responseText = await response.text();
+  let data = {};
+
+  try {
+    data = responseText ? JSON.parse(responseText) : {};
+  } catch (error) {
+    data = {
+      raw: responseText
+    };
+  }
+
+  if (!response.ok) {
+    throw new Error(data.error || `HTTP ${response.status}: ${responseText || "请求失败。"}`);
+  }
+
+  return data;
+}
+
 function normalizeBackendBaseUrl(rawValue) {
   const value = String(rawValue || "").trim() || DEFAULT_BACKEND_BASE_URL;
 
@@ -184,6 +248,16 @@ async function loadBackendBaseUrl() {
   }
 }
 
+async function loadBackendTokenState() {
+  try {
+    const result = await chrome.storage.local.get(BACKEND_TOKEN_STORAGE_KEY);
+    popupState.backendToken = String(result[BACKEND_TOKEN_STORAGE_KEY] || "");
+  } catch (error) {
+    popupState.backendToken = "";
+    console.error(error);
+  }
+}
+
 async function saveBackendBaseUrl() {
   const originalText = saveBackendUrlButton.textContent;
 
@@ -212,6 +286,11 @@ async function saveBackendBaseUrl() {
 
 function formatLogEntry(entry, index) {
   const total = popupState.urlLogs.length;
+
+  if (!isUrlNavigationLog(entry)) {
+    return formatRuntimeLogEntry(entry, index, total);
+  }
+
   const lines = [
     `#${total - index} ${entry.time || ""}`,
     `来源: ${entry.reason || "-"}`,
@@ -234,17 +313,67 @@ function formatLogEntry(entry, index) {
   return lines.join("\n");
 }
 
+function isUrlNavigationLog(entry) {
+  return Boolean(entry?.url || entry?.reason);
+}
+
+function formatRuntimeLogEntry(entry, index, total) {
+  const details = entry.details || {};
+  const lines = [
+    `#${total - index} ${entry.time || ""}`,
+    `类型: ${entry.eventType || entry.type || "runtime_event"}`
+  ];
+
+  if (details.backendBaseUrl) {
+    lines.push(`后端: ${details.backendBaseUrl}`);
+  }
+
+  if (details.targetUrl) {
+    lines.push(`接口: ${details.targetUrl}`);
+  }
+
+  if (details.token) {
+    lines.push(`token: ${details.token}`);
+  }
+
+  if (details.tabCount !== undefined) {
+    lines.push(`标签页数量: ${details.tabCount}`);
+  }
+
+  if (details.savedTo) {
+    lines.push(`保存位置: ${details.savedTo}`);
+  }
+
+  if (details.url) {
+    lines.push(`URL: ${details.url}`);
+  }
+
+  if (details.textBytes !== undefined) {
+    lines.push(`文本字节: ${details.textBytes}`);
+  }
+
+  if (details.htmlBytes !== undefined) {
+    lines.push(`HTML字节: ${details.htmlBytes}`);
+  }
+
+  if (details.error) {
+    lines.push(`错误: ${details.error}`);
+  }
+
+  return lines.join("\n");
+}
+
 function renderUrlLogger() {
   urlLoggerEnabledElement.checked = popupState.urlLoggerEnabled;
   setUrlLoggerStatus(
     popupState.urlLoggerEnabled
-      ? `记录中，当前共 ${popupState.urlLogs.length} 条`
-      : "记录已关闭"
+      ? `运行日志记录中，当前共 ${popupState.urlLogs.length} 条`
+      : "URL 运行记录已关闭，主动操作日志仍会记录"
   );
 
   urlLoggerLogsElement.textContent = popupState.urlLogs.length
     ? popupState.urlLogs.map(formatLogEntry).join("\n\n")
-    : "当前还没有跳转记录。";
+    : "当前还没有运行日志。";
 }
 
 async function loadUrlLoggerState() {
@@ -261,7 +390,7 @@ async function loadUrlLoggerState() {
 
 function buildUrlLogsText() {
   if (!popupState.urlLogs.length) {
-    return "当前没有可复制的网页跳转记录。";
+    return "当前没有可复制的运行日志。";
   }
 
   return popupState.urlLogs.map(formatLogEntry).join("\n\n");
@@ -290,7 +419,7 @@ function exportUrlLogs() {
   const anchor = document.createElement("a");
 
   anchor.href = downloadUrl;
-  anchor.download = `url-jump-log-${Date.now()}.json`;
+  anchor.download = `runtime-log-${Date.now()}.json`;
   anchor.click();
 
   window.setTimeout(() => {
@@ -298,6 +427,25 @@ function exportUrlLogs() {
   }, 1000);
 
   setUrlLoggerStatus(`已导出 ${popupState.urlLogs.length} 条记录。`);
+}
+
+async function appendRuntimeLog(eventType, details = {}) {
+  const entry = {
+    time: getLocalLogTime(),
+    kind: "runtime",
+    eventType,
+    details
+  };
+  const result = await chrome.storage.local.get(URL_LOGGER_LOGS_KEY);
+  const logs = Array.isArray(result[URL_LOGGER_LOGS_KEY]) ? result[URL_LOGGER_LOGS_KEY] : [];
+  const nextLogs = [entry, ...logs].slice(0, MAX_RUNTIME_LOGS);
+
+  await chrome.storage.local.set({
+    [URL_LOGGER_LOGS_KEY]: nextLogs
+  });
+
+  popupState.urlLogs = nextLogs;
+  renderUrlLogger();
 }
 
 async function setUrlLoggerEnabled(enabled) {
@@ -347,53 +495,332 @@ async function clearUrlLogs() {
   });
 }
 
-async function sendManualLogReport() {
-  const backendBaseUrl = normalizeBackendBaseUrl(backendBaseUrlInput.value);
-  const targetUrl = new URL("api/report", backendBaseUrl).toString();
-  const manifest = chrome.runtime.getManifest();
-  const payload = {
-    event_name: "extension_loaded",
-    time: new Date().toISOString(),
-    extension_version: manifest.version || "",
-    logger_build: "url-capture-v3",
-    backend_base_url: backendBaseUrl,
-    details: {
-      trigger: "popup_feature_1",
-      reason: "manual_test",
-      extension_id: chrome.runtime.id,
-      extension_name: manifest.name || ""
-    }
+async function getBackendToken(backendBaseUrl) {
+  const targetUrl = new URL("api/get_crc_token", backendBaseUrl).toString();
+  const data = await requestJson(targetUrl, {
+    method: "GET"
+  });
+
+  if (!data.ok || !data.token) {
+    throw new Error(data.error || "获取后端 token 失败。");
+  }
+
+  return {
+    token: String(data.token),
+    targetUrl
   };
-  const response = await fetch(targetUrl, {
+}
+
+async function collectAllTabInfo() {
+  const tabs = await chrome.tabs.query({});
+
+  return tabs.map((tab) => {
+    const safeUrl = maskSensitiveUrl(tab.url || "");
+
+    return {
+      id: tab.id ?? null,
+      windowId: tab.windowId ?? null,
+      title: tab.title || "",
+      url: safeUrl,
+      hostname: getHostname(safeUrl),
+      active: Boolean(tab.active),
+      incognito: Boolean(tab.incognito),
+      status: tab.status || ""
+    };
+  });
+}
+
+async function createBackendToken(backendBaseUrl, token, tabs) {
+  const targetUrl = new URL("api/token/create", backendBaseUrl).toString();
+  const data = await requestJson(targetUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
     },
-    body: JSON.stringify(payload)
+    body: JSON.stringify({
+      token,
+      time: new Date().toISOString(),
+      extension_version: manifest.version || "",
+      extension_version_name: manifest.version_name || manifest.version || "",
+      tabs
+    })
   });
-  const responseText = await response.text();
 
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${responseText || "发送测试日志失败。"}`);
-  }
-
-  let data = {};
-  try {
-    data = responseText ? JSON.parse(responseText) : {};
-  } catch (error) {
-    data = {
-      raw: responseText
-    };
-  }
-
-  if (data.ok === false) {
-    throw new Error(data.error || "服务端返回失败。");
+  if (!data.ok) {
+    throw new Error(data.error || "创建后端 token 失败。");
   }
 
   return {
     ...data,
     targetUrl
   };
+}
+
+async function refreshBackendToken() {
+  const backendBaseUrl = normalizeBackendBaseUrl(backendBaseUrlInput.value);
+
+  await appendRuntimeLog("token_refresh_started", {
+    backendBaseUrl
+  });
+
+  try {
+    const tokenResult = await getBackendToken(backendBaseUrl);
+
+    await appendRuntimeLog("token_requested", {
+      backendBaseUrl,
+      targetUrl: tokenResult.targetUrl,
+      token: tokenResult.token
+    });
+
+    const tabs = await collectAllTabInfo();
+
+    await appendRuntimeLog("tabs_snapshot_collected", {
+      backendBaseUrl,
+      token: tokenResult.token,
+      tabCount: tabs.length
+    });
+
+    let createResult;
+
+    try {
+      createResult = await createBackendToken(backendBaseUrl, tokenResult.token, tabs);
+    } catch (error) {
+      await appendRuntimeLog("token_create_failed", {
+        backendBaseUrl,
+        token: tokenResult.token,
+        tabCount: tabs.length,
+        error: error.message || String(error)
+      });
+      error.runtimeLogged = true;
+      throw error;
+    }
+
+    await appendRuntimeLog("token_create_succeeded", {
+      backendBaseUrl,
+      targetUrl: createResult.targetUrl,
+      token: tokenResult.token,
+      tabCount: tabs.length,
+      savedTo: createResult.saved_to || ""
+    });
+
+    popupState.backendToken = tokenResult.token;
+    await chrome.storage.local.set({
+      [BACKEND_TOKEN_STORAGE_KEY]: tokenResult.token
+    });
+
+    return {
+      ...createResult,
+      token: tokenResult.token,
+      tabCount: tabs.length
+    };
+  } catch (error) {
+    if (!error.runtimeLogged) {
+      await appendRuntimeLog("token_refresh_failed", {
+        backendBaseUrl,
+        error: error.message || String(error)
+      });
+    }
+    throw error;
+  }
+}
+
+async function getCurrentActiveTab() {
+  const tabs = await chrome.tabs.query({
+    active: true,
+    currentWindow: true
+  });
+  const tab = tabs[0] || popupState.currentPageTab;
+
+  if (!tab?.id) {
+    throw new Error("没有找到当前活动标签页。");
+  }
+
+  return tab;
+}
+
+async function extractPageContentFromTab(tabId) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(
+      tabId,
+      {
+        type: "EXTRACT_PAGE_CONTENT"
+      },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+
+        if (!response?.ok || !response.page) {
+          reject(new Error("页面内容提取失败。"));
+          return;
+        }
+
+        resolve(response.page);
+      }
+    );
+  });
+}
+
+async function extractPageContentByScripting(tab) {
+  if (tab.id === undefined || tab.id === null) {
+    throw new Error("目标标签页缺少 tabId，无法提取。");
+  }
+
+  const results = await chrome.scripting.executeScript({
+    target: {
+      tabId: tab.id
+    },
+    func: () => ({
+      title: document.title || "",
+      url: window.location.href,
+      text: document.body ? document.body.innerText : "",
+      html: document.documentElement ? document.documentElement.outerHTML : ""
+    })
+  });
+  const page = results?.[0]?.result;
+
+  if (!page) {
+    throw new Error("scripting 未返回页面内容。");
+  }
+
+  return page;
+}
+
+async function extractPageContentByFetch(tab) {
+  const rawUrl = tab.url || "";
+
+  if (!rawUrl) {
+    throw new Error("目标标签页没有 URL。");
+  }
+
+  const response = await fetchWithTimeout(rawUrl, {
+    method: "GET"
+  });
+  const html = await response.text();
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, "text/html");
+
+  return {
+    title: doc.title || tab.title || "",
+    url: rawUrl,
+    text: doc.body?.innerText || "",
+    html
+  };
+}
+
+async function postHtmlCapture(backendBaseUrl, captureType, page, tab) {
+  const targetPath = captureType === "text" ? "api/html/text" : "api/html/all";
+  const targetUrl = new URL(targetPath, backendBaseUrl).toString();
+  const contentField = captureType === "text" ? "text" : "html";
+  const timeoutMs = captureType === "text" ? HTML_TEXT_UPLOAD_TIMEOUT_MS : HTML_FULL_UPLOAD_TIMEOUT_MS;
+  const data = await requestJson(targetUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      token: popupState.backendToken || "",
+      time: new Date().toISOString(),
+      extension_version: manifest.version || "",
+      extension_version_name: manifest.version_name || manifest.version || "",
+      page: {
+        title: page.title || tab.title || "",
+        url: maskSensitiveUrl(page.url || tab.url || ""),
+        tabId: tab.id ?? null,
+        windowId: tab.windowId ?? null,
+        sourceReason: "current_active_tab"
+      },
+      [contentField]: page[contentField] || ""
+    })
+  }, timeoutMs);
+
+  if (!data.ok) {
+    throw new Error(data.error || `发送 ${targetPath} 失败。`);
+  }
+
+  return {
+    ...data,
+    targetUrl
+  };
+}
+
+async function captureCurrentPage() {
+  const backendBaseUrl = normalizeBackendBaseUrl(backendBaseUrlInput.value);
+  const tab = await getCurrentActiveTab();
+  const token = popupState.backendToken || "";
+
+  if (!token) {
+    throw new Error("请先点击“刷新后端token”。");
+  }
+
+  await appendRuntimeLog("html_capture_started", {
+    backendBaseUrl,
+    token,
+    url: maskSensitiveUrl(tab.url || ""),
+    tabId: tab.id,
+    windowId: tab.windowId
+  });
+
+  try {
+    let page;
+
+    try {
+      page = await extractPageContentByScripting(tab);
+    } catch (error) {
+      await appendRuntimeLog("html_capture_scripting_failed", {
+        backendBaseUrl,
+        url: maskSensitiveUrl(tab.url || ""),
+        error: error.message || String(error)
+      });
+
+      try {
+        page = await extractPageContentFromTab(tab.id);
+      } catch (contentScriptError) {
+        await appendRuntimeLog("html_capture_content_script_failed", {
+          backendBaseUrl,
+          url: maskSensitiveUrl(tab.url || ""),
+          error: contentScriptError.message || String(contentScriptError)
+        });
+        page = await extractPageContentByFetch(tab);
+      }
+    }
+
+    await appendRuntimeLog("html_capture_extracted", {
+      backendBaseUrl,
+      token,
+      url: maskSensitiveUrl(page.url || tab.url || ""),
+      textBytes: new Blob([page.text || ""]).size,
+      htmlBytes: new Blob([page.html || ""]).size
+    });
+
+    const textResult = await postHtmlCapture(backendBaseUrl, "text", page, tab);
+    const htmlResult = await postHtmlCapture(backendBaseUrl, "all", page, tab);
+
+    await appendRuntimeLog("html_capture_sent", {
+      backendBaseUrl,
+      token,
+      url: maskSensitiveUrl(page.url || tab.url || ""),
+      textBytes: textResult.bytes,
+      htmlBytes: htmlResult.bytes,
+      savedTo: `${textResult.saved_to || ""} | ${htmlResult.saved_to || ""}`
+    });
+
+    return {
+      tab,
+      page,
+      textResult,
+      htmlResult
+    };
+  } catch (error) {
+    await appendRuntimeLog("html_capture_failed", {
+      backendBaseUrl,
+      token,
+      url: tab.url || "",
+      error: error.message || String(error)
+    });
+    throw error;
+  }
 }
 
 function bindPopupActions() {
@@ -410,12 +837,38 @@ function bindPopupActions() {
 
         try {
           button.disabled = true;
-          button.textContent = "发送中...";
-          const result = await sendManualLogReport();
-          setSaveStatus(`功能1发送成功：${result.targetUrl}`);
+          button.textContent = "刷新中...";
+          const result = await refreshBackendToken();
+          setSaveStatus(`后端token刷新成功：${result.token}，已记录 ${result.tabCount} 个标签页。`);
         } catch (error) {
-          setSaveStatus(error.message || "功能1发送失败。", true);
-          console.error(error);
+          setSaveStatus(error.message || "刷新后端token失败。", true);
+          if (!isRequestTimeoutError(error)) {
+            console.error(error);
+          }
+        } finally {
+          button.disabled = false;
+          button.textContent = originalText;
+        }
+
+        logEvent("feature_button_clicked", {
+          featureId
+        });
+        return;
+      }
+
+      if (featureId === "2") {
+        const originalText = button.textContent;
+
+        try {
+          button.disabled = true;
+          button.textContent = "提取中...";
+          const result = await captureCurrentPage();
+          setSaveStatus(`页面内容已发送：${maskSensitiveUrl(result.page.url || result.tab.url || "")}`);
+        } catch (error) {
+          setSaveStatus(error.message || "页面内容提取失败。", true);
+          if (!isRequestTimeoutError(error)) {
+            console.error(error);
+          }
         } finally {
           button.disabled = false;
           button.textContent = originalText;
@@ -499,6 +952,7 @@ chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
   }
 
   const pageInfo = getCurrentPageInfo(tabs[0]);
+  popupState.currentPageTab = tabs[0] || null;
 
   messageElement.textContent = pageInfo?.title
     ? `当前页面：${pageInfo.title}`
@@ -512,4 +966,5 @@ chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
 
 bindPopupActions();
 void loadBackendBaseUrl();
+void loadBackendTokenState();
 void loadUrlLoggerState();
