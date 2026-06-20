@@ -1,6 +1,6 @@
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const EXTENSION_VERSION_NAME = chrome.runtime.getManifest().version_name || EXTENSION_VERSION;
-const LOGGER_BUILD = "url-capture-v6";
+const LOGGER_BUILD = "url-capture-v11";
 const REDACTED_VALUE = "[REDACTED]";
 const DEFAULT_BACKEND_BASE_URL = "http://127.0.0.1:8080/";
 const DEFAULT_REQUEST_TIMEOUT_MS = 3000;

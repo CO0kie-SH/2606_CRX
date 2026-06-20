@@ -1,17 +1,17 @@
 # Chrome URL 跳转捕获扩展
 
-> 当前版本：`26.6.19E`  
-> 最后更新：`2026-06-19E`  
-> 插件版本：`26.6.19`  
-> 插件展示版本：`26.6.19E`  
-> 日志构建：`url-capture-v6`  
-> 项目定位：合法合规地调试 Chrome 页面跳转链路，并通过本地 aiohttp 服务接收扩展上报、生成 CTF 测试题目和保存调试日志。
+> 当前版本：`26.6.20E`
+> 最后更新：`2026-06-20E`
+> 插件版本：`26.6.20`
+> 插件展示版本：`26.6.20E`
+> 日志构建：`url-capture-v11`
+> 项目定位：合法合规地调试 Chrome 页面跳转链路，并通过本地 aiohttp 服务接收扩展上报、生成 CTF 地址/姓名/卡片测试数据和保存调试日志。
 
 ---
 
 ## 项目简介
 
-本项目是一个 Manifest V3 Chrome 扩展 + aiohttp 本地服务的组合项目，用于记录浏览器 URL 跳转过程、生成 CTF 测试数据，并把扩展侧事件上报到本机日志目录。
+本项目是一个 Manifest V3 Chrome 扩展 + aiohttp 本地服务的组合项目，用于记录浏览器 URL 跳转过程、生成 CTF 地址/姓名/卡片测试数据，并把扩展侧事件上报到本机日志目录。
 
 当前重点不是自动化绕过浏览器限制，而是把跳转链路看清楚、记录下来、方便复现：
 
@@ -36,6 +36,11 @@
 
 | 版本 | 日期 | 说明 |
 |---|---|---|
+| `26.6.20E` | 2026-06-20E | 修正版本；插件 `version_name` 更新为 `26.6.20E`；后台日志构建更新为 `url-capture-v11`；popup 功能4恢复为“提取地址”，继续生成地址和 Luhn 测试卡，同时用新版 `JapaneseNameGenerator` 生成姓名并替换地址里的 `full_name`；popup 功能5恢复为“JS探针”，保留当前名字生成器探针能力，并备注后续可扩展关键词、触发按钮和调用栈规则研究其它 JS 方法 |
+| `26.6.20D` | 2026-06-20D | 封版版本；插件 `version_name` 更新为 `26.6.20D`；后台日志构建更新为 `url-capture-v10`；调试完成后收起按钮5“查询方法”和按钮6“生成名字”的专用功能；popup 功能4改为正式“生成名字”入口，调用本地 JSON-RPC `/api/name/generate`，返回 kanji、hiragana、romaji、meaning 等字段并写入 `log/name-YYYY-MM-DD.jsonl` |
+| `26.6.20C` | 2026-06-20C | 封版版本；插件 `version_name` 更新为 `26.6.20C`；后台日志构建更新为 `url-capture-v9`；根据按钮5运行探针确认目标页面点击“生成名字”不发网络包、由本地 JS 调用 `Math.random` 生成；后端新增 JSON-RPC `/api/name/generate` 与 `name.generate` 方法；popup 功能6改为“生成名字”，生成 kanji、hiragana、romaji、meaning 等字段并写入 `log/name-YYYY-MM-DD.jsonl` |
+| `26.6.20B` | 2026-06-20B | 封版版本；插件 `version_name` 更新为 `26.6.20B`；后台日志构建更新为 `url-capture-v8`；按钮5改为“查询方法”，可扫描当前页内联脚本和同源 JS chunk，并自动点击“生成名字”运行探针，按 `generateName`、`generatedName`、`kanji`、`hiragana`、`romaji`、`Math.random` 等关键词及运行时调用栈定位前端本地生成名字逻辑 |
+| `26.6.20A` | 2026-06-20A | 封版版本；插件 `version` 更新为 `26.6.20`，`version_name` 更新为 `26.6.20A`；后台日志构建更新为 `url-capture-v7`；popup 功能区新增第三排按钮，提供功能11到功能15，占位行为沿用现有预留按钮；保留功能4地址/姓名/卡片生成链路 |
 | `26.6.19E` | 2026-06-19E | 封版版本；插件 `version_name` 更新为 `26.6.19E`；全面升级为 JSON-RPC 2.0 通信协议；按钮3改为"抓取IP信息"，自动打开/刷新 ipinfo.dkly.net 页面并提取内容；RPC ID 采用时间戳+随机数生成唯一标识；后端自动提取 city 和 region_name 信息返回前端；前端运行日志显示 RPC ID、城市、区域信息；新增 notifications 权限支持系统通知 |
 | `26.6.19D` | 2026-06-19D | 封版版本；插件 `version_name` 更新为 `26.6.19D`；后台日志构建更新为 `url-capture-v6`；按钮2改为提取当前活动页文字和完整 HTML；完整 HTML 保存到 `db/[token]/[time].html`，不再写入 `html-all` JSONL；按钮2文字上传超时 10 秒、完整 HTML 上传超时 30 秒；补充 `main.bat` 启动说明 |
 | `26.6.19C` | 2026-06-19C | 封版版本；插件 `version_name` 更新为 `26.6.19C`；后台日志构建更新为 `url-capture-v5`；popup 增加功能6到功能10；日志面板升级为“运行日志”；刷新后端 token 请求链路写入前端运行日志 |
@@ -74,8 +79,9 @@
 ├── README.md
 ├── main.py                    # aiohttp 服务启动入口，启动日志写入 log/runtime-YYYY-MM-DD.log
 ├── main.bat                   # Windows 一键启动脚本，创建 db/log 并以 0.0.0.0:8080 启动后端
+├── ctf_toolkit.py             # 地址、kanji/kana 姓名和 Luhn 测试卡生成工具
 ├── server/
-│   ├── app.py                 # HTTP 路由、Visa 题目接口、扩展日志上报接口
+│   ├── app.py                 # HTTP 路由、地址/姓名/卡片生成接口、扩展日志上报接口
 │   └── runner.py              # aiohttp host/port 参数
 ├── static/                    # 本地 CTF Dashboard
 ├── log/                       # 运行日志和扩展上报日志
@@ -192,11 +198,12 @@ http://192.168.1.15:8080/api/html/all
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | `GET` | `/api/status` | Dashboard 状态 |
-| `GET` | `/api/visa` | 随机生成一组 Visa CTF 测试数据 |
 | `GET` | `/api/get_crc_token` | 生成 `crx-` + 32 位 hex token |
 | `POST` | `/api/token/create` | 用 token 和全部标签页快照创建 `db/[token].csv` |
 | `POST` | `/api/html/text` | 接收按钮2提取的页面正文文字，写入 `log/html-text-YYYY-MM-DD.jsonl` |
 | `POST` | `/api/html/all` | 接收按钮2提取的完整页面 HTML，保存到 `db/[token]/[time].html` |
+| `POST` | `/api/address/from-city` | 根据按钮3返回的 city/region_name 生成地址、kanji/kana 配对姓名，并附带一张 `ctf_toolkit.py` 生成的 Luhn 测试卡 |
+| `POST` | `/api/name/generate` | 根据 JSON-RPC `name.generate` 生成日本测试姓名，返回 kanji、hiragana、romaji、meaning、nameType、gender 等字段 |
 | `POST` | `/api/log` | 扩展日志上报原始路径 |
 | `POST` | `/api/report` | 扩展日志上报推荐路径，避免部分浏览器拦截 `/api/log` |
 
@@ -207,10 +214,13 @@ http://192.168.1.15:8080/api/html/all
 - 使用 Manifest V3。
 - 提供基础 popup 页面。
 - popup 提供后端地址输入框，默认 `http://127.0.0.1:8080/`。
-- popup 提供功能1到功能10，其中：
+- popup 提供功能1到功能15，其中：
   - 功能1：刷新后端 token 并创建 CSV 登录记录和 token 文件夹
   - 功能2：提取当前活动页的页面文字和完整 HTML
   - 功能3：抓取 IP 信息，自动打开/刷新 ipinfo.dkly.net 并提取城市和区域信息
+  - 功能4：根据功能3返回的城市/区域提取地址信息，返回新版日本姓名和一张 Luhn 测试卡，并把地址里的姓名替换为新版姓名
+  - 功能5：JS 探针，扫描页面脚本、下载同源 JS chunk，并通过运行时探针记录按钮触发后的调用栈；当前默认围绕名字生成器关键词，可继续扩展其它 JS 方法
+  - 功能6：预留按钮，当前使用占位点击提示
 - popup 打开时读取当前标签页信息。
 - 后台记录扩展安装、浏览器启动、popup 打开等事件。
 - popup 显示运行日志面板，包含 URL 跳转记录、刷新 token 请求链路和 IP 信息抓取记录。
@@ -230,13 +240,122 @@ http://192.168.1.15:8080/api/html/all
 - RPC ID 采用时间戳+随机数生成（时间戳×1000000+随机数），保证全局唯一性。
 - 按钮3自动打开/刷新 ipinfo.dkly.net 页面，后台加载不干扰当前浏览。
 - 按钮3自动从页面内容提取 city 和 region_name 信息，并在运行日志中显示。
+- 按钮4根据按钮3返回的 city/region_name 调用 `/api/address/from-city`，返回地址信息、`name` 字段和 `ctf_toolkit.py` 生成的 Luhn 测试卡。
+- 按钮4返回的 `address.full_name` 会替换为新版姓名生成器生成的 `kanjiFull`，`name` 字段同时包含 `kanji`、`hiragana`、`romaji`、`meaning`、`nameType`、`gender`、`effectiveGender` 和兼容旧字段。
+- 按钮5作为 JS 探针保留，当前默认扫描名字生成器相关关键词和 `Math.random` 调用栈；后续可扩展关键词、目标按钮识别和探针包装函数，用于研究其它前端 JS 方法。
 - 所有 JSONL 日志包含 `rpc_id` 字段，便于追踪完整请求链路。
 - 完整 HTML 保存为独立 `.html` 文件，避免大 HTML 写入 JSONL。
 - aiohttp 支持接收扩展上报并保存 JSONL 日志。
 - aiohttp 支持生成 `crx-` token，将首次登录记录写入 `db/[token].csv`，并创建 `db/[token]/` 保存完整 HTML。
 - aiohttp 支持启动日志落地。
-- aiohttp 支持 Visa CTF 数据生成接口 `/api/visa`。
+- aiohttp 支持地址/姓名/卡片生成接口 `/api/address/from-city`。
+- aiohttp 支持独立姓名生成接口 `/api/name/generate`。
 - aiohttp 同时兼容 REST 和 JSON-RPC 2.0 两种格式，向后兼容旧版扩展。
+
+---
+
+## 封版说明（2026-06-20E）
+
+本次围绕“26.6.20E 修正按钮4地址链路、保留按钮5 JS 探针”完成以下更新：
+
+1. `chrome-extension/manifest.json` 的 `version` 保持 `26.6.20`，符合 Chrome 纯数字点分版本要求。
+2. `chrome-extension/manifest.json` 的 `version_name` 更新为 `26.6.20E`。
+3. README 当前版本更新为 `26.6.20E`。
+4. 后台日志构建更新为 `url-capture-v11`。
+5. popup 功能4恢复为“提取地址”，继续调用 `/api/address/from-city` 生成地址和 Luhn 测试卡。
+6. 功能4使用新版 `JapaneseNameGenerator` 结果替换地址里的 `full_name`，并在日志中记录 `kanji`、`hiragana`、`romaji`、`meaning` 等字段。
+7. popup 功能5恢复为“JS探针”，保留脚本扫描、同源 JS chunk 下载和运行时 `Math.random` 调用栈捕获能力。
+8. 功能5备注为可扩展调试入口，后续可按目标页面扩展关键词、触发按钮选择和运行时包装函数，不局限于名字生成器。
+9. popup 功能6恢复为预留按钮，不再作为独立生成名字入口。
+
+---
+
+## 封版说明（2026-06-20D）
+
+本次围绕“26.6.20D 封版、按钮4正式承接生成名字功能”完成以下更新：
+
+1. `chrome-extension/manifest.json` 的 `version` 保持 `26.6.20`，符合 Chrome 纯数字点分版本要求。
+2. `chrome-extension/manifest.json` 的 `version_name` 更新为 `26.6.20D`。
+3. README 当前版本更新为 `26.6.20D`。
+4. 后台日志构建更新为 `url-capture-v10`。
+5. popup 功能4由“提取地址”改为“生成名字”，直接调用本地 `/api/name/generate`。
+6. popup 功能5“查询方法”调试入口已收起，恢复为预留按钮。
+7. popup 功能6“生成名字”独立入口已收起，恢复为预留按钮。
+8. 按钮4生成的姓名包含 `kanji`、`hiragana`、`romaji`、`meaning`、`nameType`、`gender`、`effectiveGender` 等字段，并写入 `log/name-YYYY-MM-DD.jsonl`。
+9. `/api/address/from-city` 后端接口保留，方便后续地址/卡片链路继续复用。
+
+---
+
+## 封版说明（2026-06-20C）
+
+本次围绕“26.6.20C 封版、CTF 内置生成名字功能”完成以下更新：
+
+1. `chrome-extension/manifest.json` 的 `version` 保持 `26.6.20`，符合 Chrome 纯数字点分版本要求。
+2. `chrome-extension/manifest.json` 的 `version_name` 更新为 `26.6.20C`。
+3. README 当前版本更新为 `26.6.20C`。
+4. 后台日志构建更新为 `url-capture-v9`。
+5. 根据按钮5日志判断，目标页面点击“生成名字”时未发送网络包，运行时随机调用栈指向 `/_next/static/chunks/3942.5d6dfe14e0c8738a.js`，说明生成逻辑在浏览器本地 JS 中完成。
+6. `ctf_toolkit.py` 的 `JapaneseNameGenerator` 扩展为输出 `kanji`、`hiragana`、`romaji`、`meaning`、`nameType`、`gender`、`effectiveGender` 等字段，并保留 `kanjiFull`、`kanaFull`、`kanjiGiven`、`kanaGiven` 等旧字段。
+7. aiohttp 新增 JSON-RPC 接口 `/api/name/generate`，方法名 `name.generate`，结果保存到 `log/name-YYYY-MM-DD.jsonl`。
+8. popup 功能6由占位改为“生成名字”，点击后调用本地后端生成姓名，并把 kanji、hiragana、romaji、meaning 和保存路径写入运行日志。
+
+接口示例：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "name.generate",
+  "params": {
+    "token": "crx-00000000000000000000000000000000",
+    "name_type": "fullName",
+    "gender": "unisex",
+    "count": 1
+  },
+  "id": 1
+}
+```
+
+---
+
+## 封版说明（2026-06-20B）
+
+本次围绕“26.6.20B 封版、按钮5查询生成名字方法”完成以下更新：
+
+1. `chrome-extension/manifest.json` 的 `version` 保持 `26.6.20`，符合 Chrome 纯数字点分版本要求。
+2. `chrome-extension/manifest.json` 的 `version_name` 更新为 `26.6.20B`。
+3. README 当前版本更新为 `26.6.20B`。
+4. 后台日志构建更新为 `url-capture-v8`。
+5. popup 功能5由占位按钮改为“查询方法”。
+6. 功能5会读取当前活动页脚本列表、Next.js preload chunk 和内联脚本数据。
+7. 功能5会尝试下载同源 JS chunk，并使用 `generateName`、`generatedName`、`kanji`、`hiragana`、`romaji`、`Math.random` 等关键词打分。
+8. 功能5会在页面主执行环境中临时包装 `Math.random`，自动点击“生成名字”，捕获实际调用栈。
+9. 功能5会把候选脚本 URL、来源类型、匹配分数、命中关键词、候选列表、代码片段、随机调用栈和生成后文本写入运行日志。
+
+使用方式：
+
+1. 打开目标页面，例如 `https://mjj.tools/zh/tools/japanese-name-generator`。
+2. 点击扩展 popup 的“查询方法”按钮。
+3. 在运行日志中查看 `name_method_scan_completed`，重点看“候选脚本”“随机调用栈”“命中关键词”和“代码片段”。
+
+---
+
+## 封版说明（2026-06-20A）
+
+本次围绕“26.6.20A 封版、第三排预留按钮和版本同步”完成以下更新：
+
+1. `chrome-extension/manifest.json` 的 `version` 更新为 `26.6.20`，符合 Chrome 纯数字点分版本要求。
+2. `chrome-extension/manifest.json` 的 `version_name` 更新为 `26.6.20A`。
+3. README 当前版本更新为 `26.6.20A`。
+4. 后台日志构建更新为 `url-capture-v7`。
+5. popup 功能区新增第三排按钮，提供功能11到功能15。
+6. 功能11到功能15当前为预留按钮，点击后沿用现有占位提示和 `feature_button_clicked` 日志记录。
+7. 保留既有功能4“提取地址”链路，不改变地址/姓名/卡片生成接口。
+8. 当前日志检查未发现 `ERROR`、`CRITICAL`、`Traceback` 或 `Application startup failed`。
+
+封版检查建议：
+
+- 修改 `manifest.json` 后，需要在 `chrome://extensions/` 手动刷新扩展。
+- 如果 JSONL 中仍看到 `logger_build=url-capture-v6`，说明浏览器仍在运行旧 service worker；刷新扩展后应看到 `logger_build=url-capture-v7`。
 
 ---
 
@@ -315,7 +434,7 @@ http://192.168.1.15:8080/api/html/all
 - `main.py`、`server/app.py`、`server/runner.py` Python 编译检查通过。
 - `/api/get_crc_token`、`/api/token/create`、`/api/html/text`、`/api/html/all` 行为已通过本地接口验证。
 - 完整 HTML 已验证保存为 `db/[token]/[time].html`，且 `html-all` JSONL 不再增长。
-- 当前工作树中 `visa_card_gen.py` 处于删除状态，因此本次封版未将它纳入 Python 编译检查；对应 `/api/visa` 在缺少该文件时会按现有逻辑返回 404。
+- 旧独立卡片生成器已移除，卡片生成改由 `ctf_toolkit.py` 的 `LuhnCardGenerator` 提供。
 
 ## 封版说明（2026-06-19C）
 
@@ -485,7 +604,7 @@ https://getip.morelogin.com/black_whiteList_stop_page.html
 当前版本日志标题格式：
 
 ```text
-[My Extension v26.6.19D url-capture-v6] url_jump_recorded 2026-...
+[My Extension v26.6.20E url-capture-v11] url_jump_recorded 2026-...
 ```
 
 如果仍然看到旧格式：
@@ -544,7 +663,9 @@ https://getip.morelogin.com/black_whiteList_stop_page.html
 - 展示、复制、导出、清空运行日志
 - 功能1向 `/api/get_crc_token` 申请 token，再向 `/api/token/create` 创建 CSV 登录记录
 - 功能2提取当前活动页的页面正文文字和完整 HTML，并分别发送到 `/api/html/text` 与 `/api/html/all`
-- 功能6到功能10为预留按钮，当前使用占位点击提示
+- 功能4生成地址、Luhn 测试卡和新版日本姓名，并把地址里的姓名替换为新版姓名
+- 功能5为 JS 探针，当前默认围绕名字生成器关键词和随机调用栈，后续可扩展其它 JS 方法
+- 功能6到功能15为预留按钮，当前使用占位点击提示
 - 读取当前活动标签页
 - 输出当前页面标题、URL、域名、tab ID、窗口 ID 等信息
 - 将 popup 打开事件发送给后台日志
@@ -609,12 +730,12 @@ Get-Content -Raw .\chrome-extension\manifest.json | ConvertFrom-Json | Out-Null
 本次会话主要变更集中在：
 
 - `README.md`：项目说明文档
-- `chrome-extension/manifest.json`：版本为 `26.6.19`，展示版本为 `26.6.19D`，包含导航捕获所需权限
+- `chrome-extension/manifest.json`：版本为 `26.6.20`，展示版本为 `26.6.20E`，包含导航捕获所需权限
 - `chrome-extension/background.js`：负责后台日志、导航捕获、版本输出和加载上报
 - `chrome-extension/content.js`：负责页面内 URL 变化采集
-- `chrome-extension/popup.html`：负责 popup 布局、功能1到功能10和运行日志面板
+- `chrome-extension/popup.html`：负责 popup 布局、功能1到功能15和运行日志面板
 - `chrome-extension/popup.js`：负责地址配置、功能按钮、运行日志展示、刷新 token、CSV 创建请求和页面内容提取上报
-- `server/app.py`：负责 Dashboard、Visa 题目接口、扩展上报接口、token 生成、CSV 创建接口和页面内容接收接口
+- `server/app.py`：负责 Dashboard、地址/姓名/卡片生成接口、扩展上报接口、token 生成、CSV 创建接口和页面内容接收接口
 - `main.py`：负责初始化控制台和文件日志
 
 如需后续做版本提交，建议先检查：

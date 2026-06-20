@@ -15,8 +15,13 @@ const DEFAULT_BACKEND_BASE_URL = "http://127.0.0.1:8080/";
 const DEFAULT_REQUEST_TIMEOUT_MS = 3000;
 const HTML_TEXT_UPLOAD_TIMEOUT_MS = 10000;
 const HTML_FULL_UPLOAD_TIMEOUT_MS = 30000;
+const ADDRESS_CAPTURE_TIMEOUT_MS = 20000;
+const NAME_METHOD_SCAN_TIMEOUT_MS = 12000;
+const NAME_METHOD_MAX_SCRIPT_COUNT = 32;
+const NAME_METHOD_SNIPPET_RADIUS = 360;
 const BACKEND_BASE_URL_STORAGE_KEY = "settings.backendBaseUrl";
 const BACKEND_TOKEN_STORAGE_KEY = "settings.backendToken";
+const IP_CAPTURE_STORAGE_KEY = "settings.lastIpCapture";
 const URL_LOGGER_SETTINGS_KEY = "urlLogger.settings";
 const URL_LOGGER_LOGS_KEY = "urlLogger.global.logs";
 const MAX_RUNTIME_LOGS = 300;
@@ -36,11 +41,30 @@ const SENSITIVE_PARAM_NAMES = new Set([
   "state",
   "token"
 ]);
+const NAME_METHOD_KEYWORDS = [
+  { term: "Japanese Name Generator", weight: 12 },
+  { term: "japanese-name-generator", weight: 12 },
+  { term: "generatedName", weight: 10 },
+  { term: "generateName", weight: 10 },
+  { term: "recentNames", weight: 9 },
+  { term: "nameType", weight: 8 },
+  { term: "surname", weight: 8 },
+  { term: "givenName", weight: 8 },
+  { term: "kanji", weight: 7 },
+  { term: "hiragana", weight: 7 },
+  { term: "romaji", weight: 7 },
+  { term: "meaning", weight: 5 },
+  { term: "Math.random", weight: 5 },
+  { term: ".random(", weight: 4 },
+  { term: "randomMode", weight: 4 },
+  { term: "aiMode", weight: 3 }
+];
 const popupState = {
   urlLoggerEnabled: true,
   urlLogs: [],
   currentPageTab: null,
-  backendToken: ""
+  backendToken: "",
+  lastIpInfo: null
 };
 
 function shouldRedactParam(name) {
@@ -200,7 +224,10 @@ async function requestJson(targetUrl, options = {}, timeoutMs = DEFAULT_REQUEST_
   }
 
   if (!response.ok) {
-    throw new Error(data.error || `HTTP ${response.status}: ${responseText || "请求失败。"}`);
+    const errorMessage = typeof data.error === "string"
+      ? data.error
+      : data.error?.message;
+    throw new Error(errorMessage || `HTTP ${response.status}: ${responseText || "请求失败。"}`);
   }
 
   return data;
@@ -301,6 +328,23 @@ async function loadBackendTokenState() {
     popupState.backendToken = "";
     console.error(error);
   }
+}
+
+async function loadLastIpInfoState() {
+  try {
+    const result = await chrome.storage.local.get(IP_CAPTURE_STORAGE_KEY);
+    popupState.lastIpInfo = result[IP_CAPTURE_STORAGE_KEY] || null;
+  } catch (error) {
+    popupState.lastIpInfo = null;
+    console.error(error);
+  }
+}
+
+async function saveLastIpInfo(info) {
+  popupState.lastIpInfo = info;
+  await chrome.storage.local.set({
+    [IP_CAPTURE_STORAGE_KEY]: info
+  });
 }
 
 async function saveBackendBaseUrl() {
@@ -447,6 +491,114 @@ function formatRuntimeLogEntry(entry, index, total) {
 
   if (details.error) {
     lines.push(`错误: ${details.error}`);
+  }
+
+  if (details.message) {
+    lines.push(`提示: ${details.message}`);
+  }
+
+  if (details.addressSummary) {
+    lines.push(`地址: ${details.addressSummary}`);
+  }
+
+  if (details.addressName) {
+    lines.push(`姓名: ${details.addressName}`);
+  }
+
+  if (details.kanaName) {
+    lines.push(`片假名姓名: ${details.kanaName}`);
+  }
+
+  if (details.kanjiFamily) {
+    lines.push(`kanjiFamily: ${details.kanjiFamily}`);
+  }
+
+  if (details.kanjiGiven) {
+    lines.push(`kanjiGiven: ${details.kanjiGiven}`);
+  }
+
+  if (details.kanaFamily) {
+    lines.push(`kanaFamily: ${details.kanaFamily}`);
+  }
+
+  if (details.kanaGiven) {
+    lines.push(`kanaGiven: ${details.kanaGiven}`);
+  }
+
+  if (details.addressPhone) {
+    lines.push(`电话: ${details.addressPhone}`);
+  }
+
+  if (details.addressZip) {
+    lines.push(`邮编: ${details.addressZip}`);
+  }
+
+  if (details.cardNumber) {
+    lines.push(`卡号: ${details.cardNumber}`);
+  }
+
+  if (details.cardExpiry) {
+    lines.push(`有效期: ${details.cardExpiry}`);
+  }
+
+  if (details.cardCvv) {
+    lines.push(`CVV: ${details.cardCvv}`);
+  }
+
+  if (details.cardLuhnValid !== undefined) {
+    lines.push(`Luhn: ${details.cardLuhnValid ? "PASS" : "FAIL"}`);
+  }
+
+  if (details.scannedScriptCount !== undefined) {
+    lines.push(`扫描脚本数: ${details.scannedScriptCount}`);
+  }
+
+  if (details.candidateCount !== undefined) {
+    lines.push(`候选数量: ${details.candidateCount}`);
+  }
+
+  if (details.methodScriptUrl) {
+    lines.push(`候选脚本: ${details.methodScriptUrl}`);
+  }
+
+  if (details.methodSourceKind) {
+    lines.push(`来源类型: ${details.methodSourceKind}`);
+  }
+
+  if (details.methodScore !== undefined) {
+    lines.push(`匹配分数: ${details.methodScore}`);
+  }
+
+  if (details.matchedKeywords) {
+    lines.push(`命中关键词: ${details.matchedKeywords}`);
+  }
+
+  if (details.methodCandidates) {
+    lines.push(`候选列表: ${details.methodCandidates}`);
+  }
+
+  if (details.methodHint) {
+    lines.push(`方法判断: ${details.methodHint}`);
+  }
+
+  if (details.methodSnippet) {
+    lines.push(`代码片段: ${details.methodSnippet}`);
+  }
+
+  if (details.methodProbeTarget) {
+    lines.push(`运行探针按钮: ${details.methodProbeTarget}`);
+  }
+
+  if (details.methodProbeRandomCalls !== undefined) {
+    lines.push(`随机调用次数: ${details.methodProbeRandomCalls}`);
+  }
+
+  if (details.methodProbeStack) {
+    lines.push(`随机调用栈: ${details.methodProbeStack}`);
+  }
+
+  if (details.methodProbeOutput) {
+    lines.push(`生成后文本: ${details.methodProbeOutput}`);
   }
 
   return lines.join("\n");
@@ -826,6 +978,628 @@ async function postHtmlCapture(backendBaseUrl, captureType, page, tab, token) {
   };
 }
 
+function summarizeAddress(address) {
+  if (!address || typeof address !== "object") {
+    return "";
+  }
+
+  if (address.country === "US") {
+    return [
+      address.street || "",
+      address.city || "",
+      address.state || "",
+      address.zip || ""
+    ].filter(Boolean).join(", ");
+  }
+
+  return [
+    address.address_en || address.address || address.address_cn || "",
+    address.city || "",
+    address.state || "",
+    address.zip || ""
+  ].filter(Boolean).join(", ");
+}
+
+function formatCardNumber(number) {
+  const digits = String(number || "").replace(/\D+/g, "");
+
+  if (digits.length !== 16) {
+    return String(number || "");
+  }
+
+  return `${digits.slice(0, 4)} ${digits.slice(4, 8)} ${digits.slice(8, 12)} ${digits.slice(12, 16)}`;
+}
+
+async function requestAddressFromCity(backendBaseUrl, token, ipInfo) {
+  const targetUrl = new URL("api/address/from-city", backendBaseUrl).toString();
+  const params = {
+    token,
+    time: new Date().toISOString(),
+    extension_version: manifest.version || "",
+    extension_version_name: manifest.version_name || manifest.version || "",
+    source: "button4_address_capture",
+    city: ipInfo.city || "",
+    region_name: ipInfo.regionName || ipInfo.region_name || "",
+    country: "JP"
+  };
+
+  const result = await requestJsonRpc(targetUrl, "address.fromCity", params, ADDRESS_CAPTURE_TIMEOUT_MS);
+
+  if (!result.ok) {
+    throw new Error(result.error || "提取地址信息失败。");
+  }
+
+  return {
+    ...result,
+    targetUrl
+  };
+}
+
+async function captureAddressInfo() {
+  const backendBaseUrl = normalizeBackendBaseUrl(backendBaseUrlInput.value);
+  const token = popupState.backendToken || "";
+
+  if (!token) {
+    throw new Error("请先点击\"刷新后端token\"。");
+  }
+
+  const ipInfo = popupState.lastIpInfo || {};
+  if (!ipInfo.city && !ipInfo.regionName && !ipInfo.region_name) {
+    throw new Error("请先点击\"抓取IP信息\"，成功返回 city 后再提取地址。");
+  }
+
+  await appendRuntimeLog("address_capture_started", {
+    backendBaseUrl,
+    token,
+    city: ipInfo.city || "",
+    regionName: ipInfo.regionName || ipInfo.region_name || ""
+  });
+
+  try {
+    const result = await requestAddressFromCity(backendBaseUrl, token, ipInfo);
+    const addressSummary = summarizeAddress(result.address);
+
+    await appendRuntimeLog("address_capture_succeeded", {
+      backendBaseUrl,
+      token,
+      targetUrl: result.targetUrl,
+      city: result.source_city || ipInfo.city || "",
+      regionName: result.source_region_name || ipInfo.regionName || ipInfo.region_name || "",
+      addressSummary,
+      addressName: result.name?.kanjiFull || result.address?.full_name || "",
+      kanji: result.name?.kanji || "",
+      hiragana: result.name?.hiragana || "",
+      romaji: result.name?.romaji || "",
+      meaning: result.name?.meaning || "",
+      nameType: result.name?.nameType || "",
+      gender: result.name?.gender || "",
+      effectiveGender: result.name?.effectiveGender || "",
+      kanaName: result.name?.kanaFull || "",
+      kanjiFamily: result.name?.kanjiFamily || "",
+      kanjiGiven: result.name?.kanjiGiven || "",
+      kanaFamily: result.name?.kanaFamily || "",
+      kanaGiven: result.name?.kanaGiven || "",
+      addressPhone: result.address?.phone || "",
+      addressZip: result.address?.zip || "",
+      cardNumber: formatCardNumber(result.card?.number || ""),
+      cardExpiry: result.card?.expiry || "",
+      cardCvv: result.card?.cvv || "",
+      cardLuhnValid: result.card?.luhn_valid,
+      savedTo: result.saved_to || ""
+    });
+
+    return {
+      ...result,
+      addressSummary,
+      cardSummary: formatCardNumber(result.card?.number || ""),
+      nameSummary: summarizeGeneratedName(result.name) || result.name?.kanaFull || ""
+    };
+  } catch (error) {
+    await appendRuntimeLog("address_capture_failed", {
+      backendBaseUrl,
+      token,
+      city: ipInfo.city || "",
+      regionName: ipInfo.regionName || ipInfo.region_name || "",
+      error: error.message || String(error)
+    });
+    throw error;
+  }
+}
+
+function summarizeGeneratedName(name) {
+  if (!name) {
+    return "";
+  }
+
+  const kanji = name.kanji || name.kanjiFull || "";
+  const romaji = name.romaji || name.romajiFull || "";
+  const hiragana = name.hiragana || name.hiraganaFull || name.kanaFull || "";
+
+  return [kanji, hiragana, romaji].filter(Boolean).join(" / ");
+}
+
+async function requestGeneratedName(backendBaseUrl, token) {
+  const targetUrl = new URL("api/name/generate", backendBaseUrl).toString();
+  const params = {
+    token,
+    time: new Date().toISOString(),
+    extension_version: manifest.version || "",
+    extension_version_name: manifest.version_name || manifest.version || "",
+    source: "button4_name_generate",
+    name_type: "fullName",
+    gender: "unisex",
+    count: 1
+  };
+
+  const result = await requestJsonRpc(targetUrl, "name.generate", params, NAME_GENERATE_TIMEOUT_MS);
+
+  if (!result.ok) {
+    throw new Error(result.error || "生成名字失败。");
+  }
+
+  return {
+    ...result,
+    targetUrl
+  };
+}
+
+async function generateNameInfo() {
+  const backendBaseUrl = normalizeBackendBaseUrl(backendBaseUrlInput.value);
+  const token = popupState.backendToken || "";
+
+  if (!token) {
+    throw new Error("请先点击\"刷新后端token\"。");
+  }
+
+  await appendRuntimeLog("name_generate_started", {
+    backendBaseUrl,
+    token,
+    nameType: "fullName",
+    gender: "unisex"
+  });
+
+  try {
+    const result = await requestGeneratedName(backendBaseUrl, token);
+    const name = result.name || {};
+    const nameSummary = summarizeGeneratedName(name);
+
+    await appendRuntimeLog("name_generate_succeeded", {
+      backendBaseUrl,
+      token,
+      targetUrl: result.targetUrl,
+      kanji: name.kanji || "",
+      hiragana: name.hiragana || "",
+      romaji: name.romaji || "",
+      meaning: name.meaning || "",
+      nameType: name.nameType || "",
+      gender: name.gender || "",
+      effectiveGender: name.effectiveGender || "",
+      kanjiFamily: name.kanjiFamily || "",
+      kanjiGiven: name.kanjiGiven || "",
+      hiraganaFamily: name.hiraganaFamily || "",
+      hiraganaGiven: name.hiraganaGiven || "",
+      romajiFamily: name.romajiFamily || "",
+      romajiGiven: name.romajiGiven || "",
+      savedTo: result.saved_to || ""
+    });
+
+    return {
+      ...result,
+      nameSummary
+    };
+  } catch (error) {
+    await appendRuntimeLog("name_generate_failed", {
+      backendBaseUrl,
+      token,
+      error: error.message || String(error)
+    });
+    throw error;
+  }
+}
+
+function countKeywordOccurrences(haystack, needle) {
+  if (!haystack || !needle) {
+    return 0;
+  }
+
+  let count = 0;
+  let index = 0;
+
+  while (index < haystack.length) {
+    const found = haystack.indexOf(needle, index);
+    if (found === -1) {
+      break;
+    }
+
+    count++;
+    index = found + needle.length;
+  }
+
+  return count;
+}
+
+function buildMethodSnippet(text, index) {
+  if (!text || index < 0) {
+    return "";
+  }
+
+  const start = Math.max(0, index - NAME_METHOD_SNIPPET_RADIUS);
+  const end = Math.min(text.length, index + NAME_METHOD_SNIPPET_RADIUS);
+
+  return text
+    .slice(start, end)
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function scanTextForNameMethod(sourceUrl, sourceKind, text) {
+  const rawText = String(text || "");
+  const lowerText = rawText.toLowerCase();
+  let score = 0;
+  let bestIndex = -1;
+  let bestWeight = 0;
+  const matched = [];
+
+  for (const item of NAME_METHOD_KEYWORDS) {
+    const lowerTerm = item.term.toLowerCase();
+    const count = countKeywordOccurrences(lowerText, lowerTerm);
+
+    if (!count) {
+      continue;
+    }
+
+    matched.push(`${item.term}x${count}`);
+    score += item.weight * Math.min(count, 8);
+
+    const index = lowerText.indexOf(lowerTerm);
+    if (item.weight > bestWeight || bestIndex === -1) {
+      bestIndex = index;
+      bestWeight = item.weight;
+    }
+  }
+
+  if (!score) {
+    return null;
+  }
+
+  if (sourceKind === "inline") {
+    score = Math.max(1, Math.floor(score * 0.2));
+  }
+
+  return {
+    sourceUrl,
+    sourceKind,
+    score,
+    matchedKeywords: matched,
+    bytes: new Blob([rawText]).size,
+    snippet: buildMethodSnippet(rawText, bestIndex)
+  };
+}
+
+function isLikelyScriptUrl(url) {
+  if (!url) {
+    return false;
+  }
+
+  try {
+    const parsed = new URL(url);
+    return parsed.pathname.endsWith(".js") || parsed.pathname.includes("/_next/static/chunks/");
+  } catch (error) {
+    return false;
+  }
+}
+
+function shouldSkipScriptUrl(url) {
+  const value = String(url || "").toLowerCase();
+  return (
+    value.includes("googletagmanager.com") ||
+    value.includes("google-analytics.com") ||
+    value.includes("clarity.ms") ||
+    value.includes("cloudflareinsights.com") ||
+    value.includes("beacon.min.js") ||
+    value.includes("/sentry-") ||
+    value.includes("/polyfills-") ||
+    value.includes("/webpack-") ||
+    value.includes("/main-app-")
+  );
+}
+
+async function collectPageScriptAssets(tab) {
+  const results = await chrome.scripting.executeScript({
+    target: {
+      tabId: tab.id
+    },
+    func: () => {
+      const toAbsoluteUrl = (value) => {
+        if (!value) {
+          return "";
+        }
+
+        try {
+          return new URL(value, window.location.href).toString();
+        } catch (error) {
+          return "";
+        }
+      };
+      const toChunkUrl = (value) => {
+        if (!value) {
+          return "";
+        }
+
+        if (value.startsWith("/_next/")) {
+          return toAbsoluteUrl(value);
+        }
+
+        if (value.startsWith("_next/")) {
+          return toAbsoluteUrl(`/${value}`);
+        }
+
+        if (value.startsWith("static/chunks/")) {
+          return toAbsoluteUrl(`/_next/${value}`);
+        }
+
+        return toAbsoluteUrl(value);
+      };
+
+      const scriptUrls = Array.from(document.scripts)
+        .map((script) => toAbsoluteUrl(script.src))
+        .filter(Boolean);
+      const preloadUrls = Array.from(document.querySelectorAll("link[rel='preload'][as='script'], link[rel='modulepreload'], link[href*='/_next/static/chunks/']"))
+        .map((link) => toAbsoluteUrl(link.href))
+        .filter(Boolean);
+      const inlineScriptTexts = Array.from(document.scripts)
+        .filter((script) => !script.src && script.textContent)
+        .map((script) => script.textContent);
+      const inlineScripts = inlineScriptTexts
+        .map((text, index) => ({
+          sourceUrl: `inline-script-${index + 1}`,
+          text: text.slice(0, 250000)
+        }));
+      const inlineChunkUrls = inlineScriptTexts
+        .flatMap((text) => Array.from(text.matchAll(/(?:\/?_next\/)?static\/chunks\/[^"'\\\]\s]+?\.js/g), (match) => toChunkUrl(match[0])))
+        .filter(Boolean);
+      const nextData = document.getElementById("__NEXT_DATA__");
+
+      if (nextData?.textContent) {
+        inlineScripts.push({
+          sourceUrl: "__NEXT_DATA__",
+          text: nextData.textContent.slice(0, 250000)
+        });
+      }
+
+      return {
+        title: document.title || "",
+        url: window.location.href,
+        scriptUrls: Array.from(new Set([...scriptUrls, ...preloadUrls, ...inlineChunkUrls])),
+        inlineScripts
+      };
+    }
+  });
+
+  const payload = results?.[0]?.result;
+  if (!payload) {
+    throw new Error("没有读取到页面脚本信息。");
+  }
+
+  return payload;
+}
+
+async function fetchScriptText(scriptUrl) {
+  const response = await fetchWithTimeout(scriptUrl, {
+    method: "GET",
+    cache: "no-store"
+  }, NAME_METHOD_SCAN_TIMEOUT_MS);
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  return await response.text();
+}
+
+async function runNameMethodRuntimeProbe(tab) {
+  const runProbe = async () => {
+    const now = () => new Date().toISOString();
+    const pickOutputText = (text) => {
+      const value = String(text || "");
+      const markers = [
+        "生成的名字",
+        "漢字",
+        "ひらがな",
+        "Romaji",
+        "Kanji",
+        "Hiragana",
+        "Generated Name"
+      ];
+      const positions = markers
+        .map((marker) => value.indexOf(marker))
+        .filter((index) => index >= 0);
+
+      if (!positions.length) {
+        return value.slice(0, 900);
+      }
+
+      const start = Math.max(0, Math.min(...positions) - 80);
+      return value.slice(start, start + 1200);
+    };
+
+    window.__codexNameMethodProbe = window.__codexNameMethodProbe || {
+      installedAt: now(),
+      randomCalls: []
+    };
+
+    if (!window.__codexNameMethodProbeInstalled) {
+      const originalRandom = Math.random.bind(Math);
+      window.__codexNameMethodProbeOriginalRandom = originalRandom;
+      Math.random = function patchedRandom(...args) {
+        const value = originalRandom(...args);
+        try {
+          window.__codexNameMethodProbe.randomCalls.push({
+            time: now(),
+            value,
+            stack: String(new Error().stack || "").split("\n").slice(0, 10).join(" | ")
+          });
+        } catch (error) {
+          // Keep the target page behavior intact even if recording fails.
+        }
+
+        return value;
+      };
+      window.__codexNameMethodProbeInstalled = true;
+    }
+
+    const controls = Array.from(document.querySelectorAll("button, [role='button']"));
+    const target = controls.find((element) => /生成名字|Generate Name/i.test(element.innerText || element.textContent || ""));
+    const beforeText = document.body ? document.body.innerText : "";
+
+    if (target) {
+      target.click();
+      await new Promise((resolve) => setTimeout(resolve, 900));
+    }
+
+    const afterText = document.body ? document.body.innerText : "";
+    const randomCalls = window.__codexNameMethodProbe.randomCalls.slice(-12);
+    const result = {
+      ok: Boolean(target),
+      targetText: target ? (target.innerText || target.textContent || "").trim().slice(0, 80) : "",
+      randomCallCount: randomCalls.length,
+      randomStack: randomCalls.length ? randomCalls[randomCalls.length - 1].stack : "",
+      outputText: pickOutputText(afterText !== beforeText ? afterText : afterText),
+      capturedAt: now()
+    };
+
+    try {
+      window.localStorage.setItem("codex.nameMethodProbe", JSON.stringify(result));
+    } catch (error) {
+      // localStorage can be unavailable; returning the result is enough.
+    }
+
+    return result;
+  };
+
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: {
+        tabId: tab.id
+      },
+      world: "MAIN",
+      func: runProbe
+    });
+    return results?.[0]?.result || null;
+  } catch (error) {
+    const results = await chrome.scripting.executeScript({
+      target: {
+        tabId: tab.id
+      },
+      func: runProbe
+    });
+    return {
+      ...(results?.[0]?.result || {}),
+      fallbackWorld: true
+    };
+  }
+}
+
+function buildMethodHint(candidate) {
+  if (!candidate) {
+    return "未定位到明显的本地生成逻辑。";
+  }
+
+  const matched = candidate.matchedKeywords.join(", ");
+  if (matched.includes("Math.random") || matched.includes(".random(")) {
+    return "命中名字字段和随机函数，生成名字大概率在该 JS chunk 内本地完成。";
+  }
+
+  if (matched.includes("generateName") || matched.includes("generatedName")) {
+    return "命中生成按钮/结果字段，优先查看该 JS chunk 中相邻的函数和数组。";
+  }
+
+  return "命中名字生成器文案和字段，可能是组件入口或翻译数据；后续可扩展关键词和触发按钮规则研究其它 JS 方法。";
+}
+
+async function inspectNameGenerationMethod() {
+  const tab = await getCurrentActiveTab();
+
+  await appendRuntimeLog("name_method_scan_started", {
+    url: maskSensitiveUrl(tab.url || ""),
+    tabId: tab.id,
+    windowId: tab.windowId,
+    message: "开始扫描当前页脚本，查找生成名字或其它可扩展前端方法。"
+  });
+
+  try {
+    const assets = await collectPageScriptAssets(tab);
+    const runtimeProbe = await runNameMethodRuntimeProbe(tab);
+    const inlineCandidates = assets.inlineScripts
+      .map((item) => scanTextForNameMethod(item.sourceUrl, "inline", item.text))
+      .filter(Boolean);
+    const scriptUrls = assets.scriptUrls
+      .filter(isLikelyScriptUrl)
+      .filter((url) => !shouldSkipScriptUrl(url))
+      .slice(0, NAME_METHOD_MAX_SCRIPT_COUNT);
+
+    const fetchedResults = await Promise.all(scriptUrls.map(async (scriptUrl) => {
+      try {
+        const text = await fetchScriptText(scriptUrl);
+        return scanTextForNameMethod(scriptUrl, "external-js", text);
+      } catch (error) {
+        return {
+          sourceUrl: scriptUrl,
+          sourceKind: "external-js",
+          score: 0,
+          matchedKeywords: [],
+          bytes: 0,
+          snippet: "",
+          error: error.message || String(error)
+        };
+      }
+    }));
+    const candidates = [...inlineCandidates, ...fetchedResults.filter((item) => item && item.score > 0)]
+      .sort((left, right) => right.score - left.score);
+    const top = candidates[0] || null;
+    const candidateSummary = candidates
+      .slice(0, 4)
+      .map((item, index) => `${index + 1}. ${item.score} ${item.sourceUrl}`)
+      .join(" | ");
+
+    await appendRuntimeLog("name_method_scan_completed", {
+      url: maskSensitiveUrl(assets.url || tab.url || ""),
+      title: assets.title || tab.title || "",
+      tabId: tab.id,
+      windowId: tab.windowId,
+      scannedScriptCount: scriptUrls.length + assets.inlineScripts.length,
+      candidateCount: candidates.length,
+      methodScriptUrl: top?.sourceUrl || "",
+      methodSourceKind: top?.sourceKind || "",
+      methodScore: top?.score ?? 0,
+      matchedKeywords: top?.matchedKeywords?.join(", ") || "",
+      methodCandidates: candidateSummary,
+      methodHint: buildMethodHint(top),
+      methodSnippet: top?.snippet || "",
+      methodProbeTarget: runtimeProbe?.targetText || "",
+      methodProbeRandomCalls: runtimeProbe?.randomCallCount ?? 0,
+      methodProbeStack: runtimeProbe?.randomStack || "",
+      methodProbeOutput: runtimeProbe?.outputText || ""
+    });
+
+    return {
+      top,
+      candidateCount: candidates.length,
+      scannedScriptCount: scriptUrls.length + assets.inlineScripts.length,
+      candidateSummary,
+      runtimeProbe
+    };
+  } catch (error) {
+    await appendRuntimeLog("name_method_scan_failed", {
+      url: maskSensitiveUrl(tab.url || ""),
+      tabId: tab.id,
+      windowId: tab.windowId,
+      error: error.message || String(error)
+    });
+    throw error;
+  }
+}
+
 async function findOrOpenTargetPage(targetUrl) {
   const tabs = await chrome.tabs.query({});
   const existingTab = tabs.find(tab => tab.url && tab.url.startsWith(targetUrl));
@@ -1193,6 +1967,18 @@ function bindPopupActions() {
 
           const textResult = await postHtmlCapture(backendBaseUrl, "text", page, tab, token);
 
+          if (textResult.city) {
+            await saveLastIpInfo({
+              backendBaseUrl,
+              token,
+              city: textResult.city || "",
+              regionName: textResult.region_name || "",
+              bytes: textResult.bytes || 0,
+              rpcId: textResult.rpc_id || null,
+              capturedAt: new Date().toISOString()
+            });
+          }
+
           await appendRuntimeLog("ip_info_captured", {
             backendBaseUrl,
             token,
@@ -1202,6 +1988,16 @@ function bindPopupActions() {
             bytes: textResult.bytes
           });
 
+          if (textResult.city) {
+            await appendRuntimeLog("address_extract_prompt", {
+              backendBaseUrl,
+              token,
+              city: textResult.city || "",
+              regionName: textResult.region_name || "",
+              message: "已成功返回 city。请按按钮4（提取地址）生成地址、测试卡和新姓名。"
+            });
+          }
+
           if (textResult.city && textResult.region_name) {
             setSaveStatus(`IP信息已保存：${textResult.region_name} / ${textResult.city}（${textResult.bytes} 字节）`);
           } else {
@@ -1209,6 +2005,59 @@ function bindPopupActions() {
           }
         } catch (error) {
           setSaveStatus(error.message || "抓取失败。", true);
+          if (!isRequestTimeoutError(error)) {
+            console.error(error);
+          }
+        } finally {
+          button.disabled = false;
+          button.textContent = originalText;
+        }
+
+        logEvent("feature_button_clicked", {
+          featureId
+        });
+        return;
+      }
+
+      if (featureId === "4") {
+        const originalText = button.textContent;
+
+        try {
+          button.disabled = true;
+          button.textContent = "提取中...";
+          const result = await captureAddressInfo();
+          setSaveStatus(`地址、姓名和卡已提取：${result.nameSummary || "姓名已保存"}；卡号 ${result.cardSummary || "已保存到日志"}`);
+        } catch (error) {
+          setSaveStatus(error.message || "地址信息提取失败。", true);
+          if (!isRequestTimeoutError(error)) {
+            console.error(error);
+          }
+        } finally {
+          button.disabled = false;
+          button.textContent = originalText;
+        }
+
+        logEvent("feature_button_clicked", {
+          featureId
+        });
+        return;
+      }
+
+      if (featureId === "5") {
+        const originalText = button.textContent;
+
+        try {
+          button.disabled = true;
+          button.textContent = "探测中...";
+          const result = await inspectNameGenerationMethod();
+
+          if (result.top?.sourceUrl) {
+            setSaveStatus(`探针已定位候选：${result.top.sourceUrl}，分数 ${result.top.score}，候选 ${result.candidateCount} 个。`);
+          } else {
+            setSaveStatus(`探针已扫描 ${result.scannedScriptCount} 个脚本，暂未命中明显方法。`, true);
+          }
+        } catch (error) {
+          setSaveStatus(error.message || "JS探针执行失败。", true);
           if (!isRequestTimeoutError(error)) {
             console.error(error);
           }
@@ -1310,4 +2159,5 @@ chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
 bindPopupActions();
 void loadBackendBaseUrl();
 void loadBackendTokenState();
+void loadLastIpInfoState();
 void loadUrlLoggerState();

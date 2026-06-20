@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "My Chrome Extension",
-  "version": "26.6.19",
-  "version_name": "26.6.19E",
+  "version": "26.6.20",
+  "version_name": "26.6.20E",
   "description": "A starter Chrome extension.",
   "permissions": [
     "activeTab",
