@@ -601,6 +601,22 @@ function formatRuntimeLogEntry(entry, index, total) {
     lines.push(`生成后文本: ${details.methodProbeOutput}`);
   }
 
+  if (details.accessToken) {
+    lines.push(`AccessToken: ${details.accessToken}`);
+  }
+
+  if (details.user) {
+    lines.push(`用户: ${details.user}`);
+  }
+
+  if (details.expires) {
+    lines.push(`过期时间: ${details.expires}`);
+  }
+
+  if (details.parseError) {
+    lines.push(`解析错误: ${details.parseError}`);
+  }
+
   return lines.join("\n");
 }
 
@@ -2058,6 +2074,331 @@ function bindPopupActions() {
           }
         } catch (error) {
           setSaveStatus(error.message || "JS探针执行失败。", true);
+          if (!isRequestTimeoutError(error)) {
+            console.error(error);
+          }
+        } finally {
+          button.disabled = false;
+          button.textContent = originalText;
+        }
+
+        logEvent("feature_button_clicked", {
+          featureId
+        });
+        return;
+      }
+
+      if (featureId === "6") {
+        const originalText = button.textContent;
+
+        try {
+          button.disabled = true;
+          button.textContent = "提取中...";
+
+          const backendBaseUrl = normalizeBackendBaseUrl(backendBaseUrlInput.value);
+          const token = popupState.backendToken || "";
+
+          if (!token) {
+            throw new Error("请先点击\"刷新后端token\"。");
+          }
+
+          const targetUrl = "https://chatgpt.com/api/auth/session";
+          const tabs = await chrome.tabs.query({});
+          let tab = tabs.find(t => t.url && t.url.startsWith(targetUrl));
+
+          if (tab) {
+            button.textContent = "刷新页面...";
+            await chrome.tabs.reload(tab.id);
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+
+            button.textContent = "等待加载...";
+            let attempts = 0;
+            while (attempts < 20) {
+              const updatedTab = await chrome.tabs.get(tab.id);
+              if (updatedTab.status === "complete") {
+                tab = updatedTab;
+                break;
+              }
+              await new Promise((resolve) => setTimeout(resolve, 500));
+              attempts++;
+            }
+          } else {
+            button.textContent = "打开页面...";
+            tab = await chrome.tabs.create({
+              url: targetUrl,
+              active: false
+            });
+
+            button.textContent = "等待页面...";
+            await new Promise((resolve) => setTimeout(resolve, 3000));
+
+            let attempts = 0;
+            while (attempts < 20) {
+              const updatedTab = await chrome.tabs.get(tab.id);
+              if (updatedTab.status === "complete") {
+                tab = updatedTab;
+                break;
+              }
+              await new Promise((resolve) => setTimeout(resolve, 500));
+              attempts++;
+            }
+          }
+
+          button.textContent = "提取中...";
+
+          // 使用 scripting API 提取页面内容
+          const results = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: () => {
+              // 尝试多种方式提取内容
+              const bodyText = document.body ? document.body.innerText : "";
+              const preText = document.querySelector("pre") ? document.querySelector("pre").innerText : "";
+              const htmlContent = document.documentElement ? document.documentElement.outerHTML : "";
+
+              return {
+                bodyText,
+                preText,
+                htmlContent,
+                url: window.location.href,
+                title: document.title
+              };
+            }
+          });
+
+          const extractedData = results?.[0]?.result;
+
+          console.log("[按钮6] 提取的原始数据:", extractedData);
+
+          if (!extractedData) {
+            throw new Error("未能提取页面内容");
+          }
+
+          // 优先使用 pre 标签内容，其次使用 body 文本
+          let rawText = extractedData.preText || extractedData.bodyText || "";
+
+          console.log("[按钮6] 原始文本长度:", rawText.length);
+          console.log("[按钮6] 原始文本前500字符:", rawText.slice(0, 500));
+
+          let sessionData = null;
+          let accessToken = "";
+          let errorDetail = "";
+
+          try {
+            sessionData = JSON.parse(rawText);
+            accessToken = sessionData.accessToken || "";
+            console.log("[按钮6] JSON 解析成功，accessToken 长度:", accessToken.length);
+            console.log("[按钮6] sessionData keys:", Object.keys(sessionData || {}));
+          } catch (parseError) {
+            errorDetail = `JSON 解析失败: ${parseError.message}`;
+            console.error("[按钮6] JSON 解析错误:", parseError);
+            console.error("[按钮6] 尝试解析的文本:", rawText.slice(0, 1000));
+          }
+
+          await appendRuntimeLog("chatgpt_at_captured", {
+            backendBaseUrl,
+            token,
+            url: maskSensitiveUrl(targetUrl),
+            tabId: tab.id,
+            windowId: tab.windowId,
+            accessToken: accessToken ? `${accessToken.slice(0, 20)}...` : "",
+            user: sessionData?.user?.email || "",
+            expires: sessionData?.expires || "",
+            textBytes: rawText.length,
+            parseError: errorDetail
+          });
+
+          if (accessToken) {
+            // 切换到该标签页
+            await chrome.tabs.update(tab.id, { active: true });
+            await chrome.windows.update(tab.windowId, { focused: true });
+
+            console.log("[按钮6] 准备注入浮窗，accessToken 长度:", accessToken.length);
+
+            // 等待一下确保页面完全加载
+            await new Promise((resolve) => setTimeout(resolve, 500));
+
+            // 注入浮窗
+            try {
+              await chrome.scripting.executeScript({
+                target: { tabId: tab.id },
+                world: "MAIN",
+                func: (at, userEmail, backendUrl, crxToken) => {
+                  console.log("[浮窗脚本] 开始执行，AT长度:", at.length);
+                  console.log("[浮窗脚本] document.body 存在:", !!document.body);
+                  console.log("[浮窗脚本] 当前 URL:", window.location.href);
+
+                  // 移除旧浮窗
+                  const oldFloat = document.getElementById("crx-at-float");
+                  if (oldFloat) {
+                    console.log("[浮窗脚本] 移除旧浮窗");
+                    oldFloat.remove();
+                  }
+
+                  // 创建浮窗容器
+                  const floatDiv = document.createElement("div");
+                  floatDiv.id = "crx-at-float";
+
+                  // 使用内联样式，确保不被页面 CSS 覆盖
+                  floatDiv.style.cssText = `
+                    position: fixed !important;
+                    top: 20px !important;
+                    right: 20px !important;
+                    width: 320px !important;
+                    background: #ffffff !important;
+                    border: 2px solid #10a37f !important;
+                    border-radius: 12px !important;
+                    padding: 16px !important;
+                    box-shadow: 0 4px 20px rgba(0,0,0,0.15) !important;
+                    z-index: 2147483647 !important;
+                    font-family: Arial, sans-serif !important;
+                    font-size: 13px !important;
+                    color: #333 !important;
+                    display: block !important;
+                    visibility: visible !important;
+                    opacity: 1 !important;
+                  `;
+
+                  floatDiv.innerHTML = `
+                    <div style="margin-bottom: 12px !important; font-weight: bold !important; color: #10a37f !important; font-size: 14px !important;">
+                      ✓ AccessToken 已提取
+                    </div>
+                    <div style="margin-bottom: 8px !important; color: #666 !important; word-break: break-all !important; font-size: 11px !important;">
+                      账号: ${userEmail}
+                    </div>
+                    <div style="margin-bottom: 12px !important; color: #666 !important; word-break: break-all !important; font-size: 11px !important; max-height: 60px !important; overflow: auto !important; background: #f7f7f7 !important; padding: 6px !important; border-radius: 4px !important;">
+                      ${at.slice(0, 80)}...
+                    </div>
+                    <div style="display: flex !important; gap: 8px !important;">
+                      <button id="crx-copy-at" style="
+                        flex: 1 !important;
+                        height: 36px !important;
+                        background: #10a37f !important;
+                        color: white !important;
+                        border: none !important;
+                        border-radius: 6px !important;
+                        cursor: pointer !important;
+                        font-size: 13px !important;
+                        font-weight: 500 !important;
+                      ">复制 AT</button>
+                      <button id="crx-send-at" style="
+                        flex: 1 !important;
+                        height: 36px !important;
+                        background: #2563eb !important;
+                        color: white !important;
+                        border: none !important;
+                        border-radius: 6px !important;
+                        cursor: pointer !important;
+                        font-size: 13px !important;
+                        font-weight: 500 !important;
+                      ">发送后端</button>
+                    </div>
+                    <button id="crx-close-float" style="
+                      position: absolute !important;
+                      top: 8px !important;
+                      right: 8px !important;
+                      width: 24px !important;
+                      height: 24px !important;
+                      background: #f0f0f0 !important;
+                      border: none !important;
+                      border-radius: 50% !important;
+                      cursor: pointer !important;
+                      font-size: 16px !important;
+                      line-height: 1 !important;
+                      color: #666 !important;
+                    ">×</button>
+                  `;
+
+                  console.log("[浮窗脚本] 浮窗HTML已创建");
+
+                  // 强制添加到 body，即使 body 不存在也创建一个
+                  if (!document.body) {
+                    console.log("[浮窗脚本] body 不存在，创建 body");
+                    document.body = document.createElement("body");
+                    document.documentElement.appendChild(document.body);
+                  }
+
+                  document.body.appendChild(floatDiv);
+                  console.log("[浮窗脚本] 浮窗已添加到 body，元素:", floatDiv);
+                  console.log("[浮窗脚本] 浮窗位置:", floatDiv.getBoundingClientRect());
+
+                  // 复制 AT 按钮
+                  document.getElementById("crx-copy-at").addEventListener("click", async () => {
+                    console.log("[浮窗脚本] 复制按钮被点击");
+                    try {
+                      await navigator.clipboard.writeText(at);
+                      alert("AccessToken 已复制到剪贴板");
+                    } catch (err) {
+                      console.error("[浮窗脚本] 复制失败:", err);
+                      alert("复制失败：" + err.message);
+                    }
+                  });
+
+                  // 发送后端按钮
+                  document.getElementById("crx-send-at").addEventListener("click", async () => {
+                    console.log("[浮窗脚本] 发送按钮被点击");
+                    const btn = document.getElementById("crx-send-at");
+                    const originalText = btn.textContent;
+                    btn.disabled = true;
+                    btn.textContent = "发送中...";
+
+                    try {
+                      const response = await fetch(backendUrl + "api/at/save", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                          jsonrpc: "2.0",
+                          method: "at.save",
+                          params: {
+                            token: crxToken,
+                            time: new Date().toISOString(),
+                            user: userEmail,
+                            accessToken: at
+                          },
+                          id: Date.now() * 1000000 + Math.floor(Math.random() * 1000000)
+                        })
+                      });
+
+                      const result = await response.json();
+                      console.log("[浮窗脚本] 后端返回:", result);
+
+                      if (result.result?.ok) {
+                        alert("AccessToken 已保存到后端：" + (result.result.saved_to || "成功"));
+                        floatDiv.remove();
+                      } else {
+                        throw new Error(result.error?.message || "保存失败");
+                      }
+                    } catch (err) {
+                      console.error("[浮窗脚本] 发送失败:", err);
+                      alert("发送失败：" + err.message);
+                      btn.disabled = false;
+                      btn.textContent = originalText;
+                    }
+                  });
+
+                  // 关闭按钮
+                  document.getElementById("crx-close-float").addEventListener("click", () => {
+                    console.log("[浮窗脚本] 关闭按钮被点击");
+                    floatDiv.remove();
+                  });
+
+                  console.log("[浮窗脚本] 所有事件监听器已绑定");
+                },
+                args: [accessToken, sessionData?.user?.email || "", backendBaseUrl, token]
+              });
+
+              console.log("[按钮6] 浮窗注入成功");
+            } catch (injectError) {
+              console.error("[按钮6] 浮窗注入失败:", injectError);
+              setSaveStatus(`浮窗注入失败：${injectError.message}`, true);
+            }
+
+            setSaveStatus(`ChatGPT AT 已提取：${accessToken.slice(0, 30)}...（${accessToken.length} 字符）`);
+          } else {
+            setSaveStatus(`提取失败：${errorDetail || "未找到 accessToken"}`, true);
+          }
+        } catch (error) {
+          console.error("[按钮6] 整体错误:", error);
+          setSaveStatus(error.message || "提取网页AT失败。", true);
           if (!isRequestTimeoutError(error)) {
             console.error(error);
           }

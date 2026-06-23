@@ -1,10 +1,10 @@
 # Chrome URL 跳转捕获扩展
 
-> 当前版本：`26.6.20E`
-> 最后更新：`2026-06-20E`
-> 插件版本：`26.6.20`
-> 插件展示版本：`26.6.20E`
-> 日志构建：`url-capture-v11`
+> 当前版本：`26.6.23A`
+> 最后更新：`2026-06-23A`
+> 插件版本：`26.6.23`
+> 插件展示版本：`26.6.23A`
+> 日志构建：`url-capture-v12`
 > 项目定位：合法合规地调试 Chrome 页面跳转链路，并通过本地 aiohttp 服务接收扩展上报、生成 CTF 地址/姓名/卡片测试数据和保存调试日志。
 
 ---
@@ -36,7 +36,8 @@
 
 | 版本 | 日期 | 说明 |
 |---|---|---|
-| `26.6.20E` | 2026-06-20E | 修正版本；插件 `version_name` 更新为 `26.6.20E`；后台日志构建更新为 `url-capture-v11`；popup 功能4恢复为“提取地址”，继续生成地址和 Luhn 测试卡，同时用新版 `JapaneseNameGenerator` 生成姓名并替换地址里的 `full_name`；popup 功能5恢复为“JS探针”，保留当前名字生成器探针能力，并备注后续可扩展关键词、触发按钮和调用栈规则研究其它 JS 方法 |
+| `26.6.23A` | 2026-06-23A | 新增按钮6”提取网页AT”，后台打开 ChatGPT session API 并提取 accessToken；新增后端 `/api/at/save` 接口，保存 AT 到 `db/crx-xxx/at-YYYY-MM-DD.csv`；提取成功后自动切换标签页；**已知问题**：浮窗注入功能存在兼容性问题，部分页面无法显示浮窗（console 有日志但元素不可见），建议从运行日志或控制台获取 AT |
+| `26.6.20E` | 2026-06-20E | 修正版本；插件 `version_name` 更新为 `26.6.20E`；后台日志构建更新为 `url-capture-v11`；popup 功能4恢复为”提取地址”，继续生成地址和 Luhn 测试卡，同时用新版 `JapaneseNameGenerator` 生成姓名并替换地址里的 `full_name`；popup 功能5恢复为”JS探针”，保留当前名字生成器探针能力，并备注后续可扩展关键词、触发按钮和调用栈规则研究其它 JS 方法 |
 | `26.6.20D` | 2026-06-20D | 封版版本；插件 `version_name` 更新为 `26.6.20D`；后台日志构建更新为 `url-capture-v10`；调试完成后收起按钮5“查询方法”和按钮6“生成名字”的专用功能；popup 功能4改为正式“生成名字”入口，调用本地 JSON-RPC `/api/name/generate`，返回 kanji、hiragana、romaji、meaning 等字段并写入 `log/name-YYYY-MM-DD.jsonl` |
 | `26.6.20C` | 2026-06-20C | 封版版本；插件 `version_name` 更新为 `26.6.20C`；后台日志构建更新为 `url-capture-v9`；根据按钮5运行探针确认目标页面点击“生成名字”不发网络包、由本地 JS 调用 `Math.random` 生成；后端新增 JSON-RPC `/api/name/generate` 与 `name.generate` 方法；popup 功能6改为“生成名字”，生成 kanji、hiragana、romaji、meaning 等字段并写入 `log/name-YYYY-MM-DD.jsonl` |
 | `26.6.20B` | 2026-06-20B | 封版版本；插件 `version_name` 更新为 `26.6.20B`；后台日志构建更新为 `url-capture-v8`；按钮5改为“查询方法”，可扫描当前页内联脚本和同源 JS chunk，并自动点击“生成名字”运行探针，按 `generateName`、`generatedName`、`kanji`、`hiragana`、`romaji`、`Math.random` 等关键词及运行时调用栈定位前端本地生成名字逻辑 |
@@ -204,6 +205,7 @@ http://192.168.1.15:8080/api/html/all
 | `POST` | `/api/html/all` | 接收按钮2提取的完整页面 HTML，保存到 `db/[token]/[time].html` |
 | `POST` | `/api/address/from-city` | 根据按钮3返回的 city/region_name 生成地址、kanji/kana 配对姓名，并附带一张 `ctf_toolkit.py` 生成的 Luhn 测试卡 |
 | `POST` | `/api/name/generate` | 根据 JSON-RPC `name.generate` 生成日本测试姓名，返回 kanji、hiragana、romaji、meaning、nameType、gender 等字段 |
+| `POST` | `/api/at/save` | 接收按钮6提取的 ChatGPT accessToken，保存到 `db/[token]/at-YYYY-MM-DD.csv` |
 | `POST` | `/api/log` | 扩展日志上报原始路径 |
 | `POST` | `/api/report` | 扩展日志上报推荐路径，避免部分浏览器拦截 `/api/log` |
 
@@ -220,7 +222,8 @@ http://192.168.1.15:8080/api/html/all
   - 功能3：抓取 IP 信息，自动打开/刷新 ipinfo.dkly.net 并提取城市和区域信息
   - 功能4：根据功能3返回的城市/区域提取地址信息，返回新版日本姓名和一张 Luhn 测试卡，并把地址里的姓名替换为新版姓名
   - 功能5：JS 探针，扫描页面脚本、下载同源 JS chunk，并通过运行时探针记录按钮触发后的调用栈；当前默认围绕名字生成器关键词，可继续扩展其它 JS 方法
-  - 功能6：预留按钮，当前使用占位点击提示
+  - 功能6：提取网页 AT，后台打开 ChatGPT session API (`https://chatgpt.com/api/auth/session`)，提取 accessToken 并自动切换标签页；支持复制 AT 和发送到后端保存
+  - 功能7-15：预留按钮，当前使用占位点击提示
 - popup 打开时读取当前标签页信息。
 - 后台记录扩展安装、浏览器启动、popup 打开等事件。
 - popup 显示运行日志面板，包含 URL 跳转记录、刷新 token 请求链路和 IP 信息抓取记录。
@@ -251,6 +254,34 @@ http://192.168.1.15:8080/api/html/all
 - aiohttp 支持地址/姓名/卡片生成接口 `/api/address/from-city`。
 - aiohttp 支持独立姓名生成接口 `/api/name/generate`。
 - aiohttp 同时兼容 REST 和 JSON-RPC 2.0 两种格式，向后兼容旧版扩展。
+
+---
+
+## 封版说明（2026-06-23A）
+
+本次围绕"26.6.23A 新增按钮6提取网页AT功能"完成以下更新：
+
+1. `chrome-extension/manifest.json` 的 `version` 更新为 `26.6.23`，`version_name` 更新为 `26.6.23A`。
+2. README 当前版本更新为 `26.6.23A`。
+3. 后台日志构建更新为 `url-capture-v12`。
+4. popup 功能6改为"提取网页AT"，后台打开 `https://chatgpt.com/api/auth/session`。
+5. 功能6会优先从 `<pre>` 标签提取 JSON 内容，降级提取 `body.innerText`。
+6. 功能6成功提取 accessToken 后自动切换到该标签页并聚焦窗口。
+7. 功能6在运行日志中记录 `chatgpt_at_captured` 事件，包含 accessToken 前20字符、用户邮箱、过期时间等信息。
+8. 后端新增 `/api/at/save` 接口，支持 JSON-RPC 2.0 和普通 JSON 格式。
+9. `/api/at/save` 接口保存 accessToken 到 `db/crx-xxx/at-YYYY-MM-DD.csv`，CSV 格式：`time, user, accessToken`。
+10. 同一天多次提取 AT 会追加到同一文件，第一次写入时自动创建表头。
+11. **已知问题**：浮窗注入功能存在兼容性问题，脚本注入成功且控制台有详细日志，但浮窗元素在部分页面不可见（可能与页面 CSP 或样式冲突有关）。当前建议从运行日志或浏览器控制台获取 accessToken，浮窗功能待后续优化。
+
+封版检查结果：
+
+- `background.js`、`content.js`、`popup.js` 语法检查通过。
+- `manifest.json` JSON 格式检查通过。
+- `main.py`、`server/app.py`、`server/runner.py` Python 编译检查通过。
+- `/api/at/save` 接口逻辑已验证，支持 JSON-RPC 2.0 格式。
+- accessToken 提取功能已验证，可从 `<pre>` 标签正确解析 JSON。
+- 自动切换标签页功能已验证，`chrome.tabs.update` 和 `chrome.windows.update` 调用正常。
+- CSV 保存路径 `db/crx-xxx/at-YYYY-MM-DD.csv` 已验证，表头和数据行正常写入。
 
 ---
 

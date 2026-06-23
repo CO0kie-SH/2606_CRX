@@ -272,6 +272,143 @@ async def api_token_create(request: web.Request) -> web.Response:
     return json_response_with_cors(result)
 
 
+async def api_at_save(request: web.Request) -> web.Response:
+    """
+    保存 AccessToken 到 db/crx-xxx/at-YYYY-MM-DD.csv
+    """
+    if request.content_type != "application/json":
+        return json_response_with_cors(
+            {
+                "ok": False,
+                "error": "Content-Type must be application/json."
+            },
+            status=415,
+        )
+
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        return json_response_with_cors(
+            {
+                "ok": False,
+                "error": "Invalid JSON body."
+            },
+            status=400,
+        )
+
+    if not isinstance(payload, dict):
+        return json_response_with_cors(
+            {
+                "ok": False,
+                "error": "JSON body must be an object."
+            },
+            status=400,
+        )
+
+    if is_jsonrpc_request(payload):
+        rpc_id = payload.get("id")
+        params = payload.get("params")
+
+        if not isinstance(params, dict):
+            return json_response_with_cors(
+                build_jsonrpc_error(-32602, "Invalid params: must be an object.", rpc_id),
+                status=400
+            )
+
+        token = str(params.get("token", "")).strip()
+        user = str(params.get("user", "")).strip()
+        access_token = str(params.get("accessToken", "")).strip()
+        time_str = params.get("time")
+    else:
+        token = str(payload.get("token", "")).strip()
+        user = str(payload.get("user", "")).strip()
+        access_token = str(payload.get("accessToken", "")).strip()
+        time_str = payload.get("time")
+        rpc_id = None
+
+    if not is_valid_token(token):
+        error_response = {
+            "ok": False,
+            "error": "Invalid token format.",
+            "token": token,
+        }
+        if rpc_id is not None:
+            return json_response_with_cors(
+                build_jsonrpc_error(-32602, "Invalid token format.", rpc_id),
+                status=400
+            )
+        return json_response_with_cors(error_response, status=400)
+
+    if not access_token:
+        error_response = {
+            "ok": False,
+            "error": "accessToken is required.",
+        }
+        if rpc_id is not None:
+            return json_response_with_cors(
+                build_jsonrpc_error(-32602, "accessToken is required.", rpc_id),
+                status=400
+            )
+        return json_response_with_cors(error_response, status=400)
+
+    token_dir = build_token_dir_path(token)
+    if not token_dir.exists():
+        error_response = {
+            "ok": False,
+            "error": f"Token directory does not exist: {token}",
+            "token": token,
+        }
+        if rpc_id is not None:
+            return json_response_with_cors(
+                build_jsonrpc_error(-32602, f"Token directory does not exist: {token}", rpc_id),
+                status=400
+            )
+        return json_response_with_cors(error_response, status=400)
+
+    # 构建 CSV 文件路径: db/crx-xxx/at-YYYY-MM-DD.csv
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    at_csv_file = token_dir / f"at-{today_str}.csv"
+
+    created_at = time_str if isinstance(time_str, str) and time_str else utc_iso_now()
+
+    # CSV 表头
+    at_csv_headers = ["time", "user", "accessToken"]
+
+    # 写入或追加 CSV
+    file_exists = at_csv_file.exists()
+    try:
+        with at_csv_file.open("a", newline="", encoding="utf-8") as fp:
+            writer = csv.writer(fp)
+            if not file_exists:
+                writer.writerow(at_csv_headers)
+            writer.writerow([created_at, user, access_token])
+    except Exception as e:
+        error_response = {
+            "ok": False,
+            "error": f"Failed to write AT CSV: {str(e)}",
+        }
+        if rpc_id is not None:
+            return json_response_with_cors(
+                build_jsonrpc_error(-32000, f"Failed to write AT CSV: {str(e)}", rpc_id),
+                status=500
+            )
+        return json_response_with_cors(error_response, status=500)
+
+    LOGGER.info("Saved AccessToken. token=%s user=%s file=%s", token, user, at_csv_file)
+
+    result = {
+        "ok": True,
+        "token": token,
+        "user": user,
+        "saved_to": display_token_csv_path(at_csv_file),
+    }
+
+    if rpc_id is not None:
+        return json_response_with_cors(build_jsonrpc_response(result, rpc_id))
+
+    return json_response_with_cors(result)
+
+
 async def api_log(request: web.Request) -> web.Response:
     if request.content_type != "application/json":
         return json_response_with_cors(
@@ -972,6 +1109,8 @@ def create_app() -> web.Application:
     app.router.add_post("/api/address/from-city", api_address_from_city)
     app.router.add_options("/api/name/generate", api_log_options)
     app.router.add_post("/api/name/generate", api_name_generate)
+    app.router.add_options("/api/at/save", api_log_options)
+    app.router.add_post("/api/at/save", api_at_save)
     app.router.add_options("/api/log", api_log_options)
     app.router.add_post("/api/log", api_log)
     app.router.add_options("/api/report", api_log_options)
