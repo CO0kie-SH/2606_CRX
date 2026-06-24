@@ -16,9 +16,14 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 3000;
 const HTML_TEXT_UPLOAD_TIMEOUT_MS = 10000;
 const HTML_FULL_UPLOAD_TIMEOUT_MS = 30000;
 const ADDRESS_CAPTURE_TIMEOUT_MS = 20000;
+const NAME_GENERATE_TIMEOUT_MS = 10000;
 const NAME_METHOD_SCAN_TIMEOUT_MS = 12000;
+const CHATGPT_SESSION_TIMEOUT_MS = 20000;
+const CHATGPT_SESSION_SETTLE_DELAY_MS = 400;
 const NAME_METHOD_MAX_SCRIPT_COUNT = 32;
 const NAME_METHOD_SNIPPET_RADIUS = 360;
+const CHATGPT_SESSION_TARGET_URL = "https://chatgpt.com/api/auth/session";
+const CHATGPT_AT_FLOAT_HOST_ID = "crx-at-float-host";
 const BACKEND_BASE_URL_STORAGE_KEY = "settings.backendBaseUrl";
 const BACKEND_TOKEN_STORAGE_KEY = "settings.backendToken";
 const IP_CAPTURE_STORAGE_KEY = "settings.lastIpCapture";
@@ -1159,6 +1164,490 @@ async function requestGeneratedName(backendBaseUrl, token) {
   };
 }
 
+async function getOrCreateBackgroundTab(targetUrl) {
+  const tabs = await chrome.tabs.query({});
+  const existingTab = tabs.find((tab) => tab.url && tab.url.startsWith(targetUrl));
+
+  if (existingTab) {
+    await chrome.tabs.reload(existingTab.id);
+    return {
+      tabId: existingTab.id,
+      created: false
+    };
+  }
+
+  const createdTab = await chrome.tabs.create({
+    url: targetUrl,
+    active: false
+  });
+
+  return {
+    tabId: createdTab.id,
+    created: true
+  };
+}
+
+async function openChatgptSessionTab(updatePhase = () => {}) {
+  updatePhase("准备页面...");
+  const { tabId, created } = await getOrCreateBackgroundTab(CHATGPT_SESSION_TARGET_URL);
+
+  await appendRuntimeLog(created ? "chatgpt_session_tab_opened" : "chatgpt_session_tab_reloaded", {
+    targetUrl: CHATGPT_SESSION_TARGET_URL,
+    tabId
+  });
+
+  updatePhase(created ? "打开页面..." : "刷新页面...");
+  const tab = await waitForPageComplete(tabId, CHATGPT_SESSION_TIMEOUT_MS);
+  await new Promise((resolve) => setTimeout(resolve, CHATGPT_SESSION_SETTLE_DELAY_MS));
+
+  await appendRuntimeLog("chatgpt_session_ready", {
+    targetUrl: CHATGPT_SESSION_TARGET_URL,
+    tabId: tab.id,
+    windowId: tab.windowId,
+    title: tab.title || "",
+    url: maskSensitiveUrl(tab.url || "")
+  });
+
+  return tab;
+}
+
+function parseChatgptSessionResponse(textCandidates) {
+  const normalizedCandidates = Array.from(new Set(
+    (Array.isArray(textCandidates) ? textCandidates : [])
+      .map((value) => typeof value === "string" ? value.trim() : "")
+      .filter(Boolean)
+  ));
+  let lastError = "";
+
+  for (const candidate of normalizedCandidates) {
+    try {
+      const sessionData = JSON.parse(candidate);
+      if (!sessionData || typeof sessionData !== "object") {
+        continue;
+      }
+
+      const accessToken = typeof sessionData.accessToken === "string" ? sessionData.accessToken.trim() : "";
+      return {
+        rawText: candidate,
+        sessionData,
+        accessToken,
+        userEmail: typeof sessionData?.user?.email === "string" ? sessionData.user.email.trim() : "",
+        expires: typeof sessionData?.expires === "string" ? sessionData.expires : ""
+      };
+    } catch (error) {
+      lastError = error.message || String(error);
+    }
+  }
+
+  if (lastError) {
+    throw new Error(`JSON 解析失败: ${lastError}`);
+  }
+
+  throw new Error("页面中未找到可解析的 JSON 文本。");
+}
+
+async function readChatgptSessionPage(tab) {
+  if (tab.id === undefined || tab.id === null) {
+    throw new Error("目标标签页缺少 tabId，无法读取 session。");
+  }
+
+  const results = await chrome.scripting.executeScript({
+    target: {
+      tabId: tab.id
+    },
+    func: () => {
+      const candidates = [
+        document.querySelector("pre")?.textContent || "",
+        document.body?.innerText || "",
+        document.documentElement?.textContent || ""
+      ]
+        .map((value) => typeof value === "string" ? value.trim() : "")
+        .filter(Boolean);
+
+      return {
+        title: document.title || "",
+        url: window.location.href,
+        contentType: document.contentType || "",
+        textCandidates: Array.from(new Set(candidates))
+      };
+    }
+  });
+  const page = results?.[0]?.result;
+
+  if (!page) {
+    throw new Error("未能提取 ChatGPT session 页面内容。");
+  }
+
+  return page;
+}
+
+async function saveChatgptAccessToken(backendBaseUrl, token, accessToken, userEmail) {
+  const saveTargetUrl = new URL("api/at/save", backendBaseUrl).toString();
+
+  try {
+    const saveResult = await requestJsonRpc(saveTargetUrl, "at.save", {
+      token,
+      time: new Date().toISOString(),
+      user: userEmail,
+      accessToken
+    }, DEFAULT_REQUEST_TIMEOUT_MS);
+
+    const savedTo = saveResult.saved_to || "";
+
+    await appendRuntimeLog("chatgpt_at_saved", {
+      backendBaseUrl,
+      token,
+      targetUrl: saveTargetUrl,
+      user: userEmail,
+      savedTo,
+      rpcId: saveResult.rpc_id || null
+    });
+
+    return {
+      targetUrl: saveTargetUrl,
+      savedTo,
+      rpcId: saveResult.rpc_id || null,
+      error: ""
+    };
+  } catch (error) {
+    const saveError = error.message || String(error);
+
+    await appendRuntimeLog("chatgpt_at_save_failed", {
+      backendBaseUrl,
+      token,
+      targetUrl: saveTargetUrl,
+      user: userEmail,
+      error: saveError
+    });
+
+    return {
+      targetUrl: saveTargetUrl,
+      savedTo: "",
+      rpcId: null,
+      error: saveError
+    };
+  }
+}
+
+async function injectChatgptAccessTokenOverlay(tab, payload) {
+  if (tab.id === undefined || tab.id === null) {
+    throw new Error("目标标签页缺少 tabId，无法注入浮窗。");
+  }
+
+  const results = await chrome.scripting.executeScript({
+    target: {
+      tabId: tab.id
+    },
+    func: (overlayPayload) => {
+      const mountTarget = document.documentElement || document.body;
+      if (!mountTarget) {
+        throw new Error("页面没有可用的挂载节点。");
+      }
+
+      const previousHost = document.getElementById(overlayPayload.hostId);
+      if (previousHost) {
+        previousHost.remove();
+      }
+
+      const host = document.createElement("div");
+      host.id = overlayPayload.hostId;
+      host.style.cssText = [
+        "all: initial !important",
+        "position: fixed !important",
+        "top: 24px !important",
+        "right: 24px !important",
+        "width: 360px !important",
+        "max-width: calc(100vw - 32px) !important",
+        "z-index: 2147483647 !important",
+        "pointer-events: auto !important"
+      ].join(";");
+
+      const root = host.attachShadow ? host.attachShadow({ mode: "open" }) : host;
+      root.innerHTML = `
+        <style>
+          :host {
+            all: initial;
+          }
+          .card {
+            box-sizing: border-box;
+            position: relative;
+            font-family: Arial, "Microsoft YaHei", sans-serif;
+            background: #ffffff;
+            color: #0f172a;
+            border: 2px solid #10a37f;
+            border-radius: 14px;
+            box-shadow: 0 18px 40px rgba(15, 23, 42, 0.24);
+            padding: 18px 16px 16px;
+          }
+          .title {
+            margin: 0 28px 12px 0;
+            font-size: 15px;
+            font-weight: 700;
+            color: #065f46;
+          }
+          .meta {
+            margin: 0 0 8px;
+            font-size: 12px;
+            line-height: 1.5;
+            color: #475569;
+            word-break: break-all;
+          }
+          .token {
+            margin: 0 0 12px;
+            padding: 10px 12px;
+            border-radius: 10px;
+            background: #f8fafc;
+            border: 1px solid #dbe4ee;
+            color: #0f172a;
+            font-family: Consolas, "Courier New", monospace;
+            font-size: 12px;
+            line-height: 1.5;
+            word-break: break-all;
+            max-height: 96px;
+            overflow: auto;
+          }
+          .status {
+            margin: 0 0 14px;
+            font-size: 12px;
+            line-height: 1.5;
+            color: #166534;
+            word-break: break-all;
+          }
+          .status.is-error {
+            color: #b91c1c;
+          }
+          .actions {
+            display: flex;
+            gap: 8px;
+          }
+          button {
+            appearance: none;
+            border: 0;
+            border-radius: 9px;
+            height: 36px;
+            padding: 0 12px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 600;
+          }
+          .copy {
+            flex: 1;
+            background: #10a37f;
+            color: #ffffff;
+          }
+          .close {
+            background: #e2e8f0;
+            color: #334155;
+          }
+          .close-icon {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            width: 26px;
+            height: 26px;
+            padding: 0;
+            border-radius: 999px;
+            background: #eef2f7;
+            color: #334155;
+            font-size: 16px;
+            line-height: 26px;
+          }
+        </style>
+        <div class="card">
+          <button class="close-icon" type="button" title="关闭">×</button>
+          <div class="title">AccessToken 已提取</div>
+          <div class="meta">账号: ${overlayPayload.userEmail || "-"}</div>
+          <div class="token">${overlayPayload.accessToken}</div>
+          <div class="status ${overlayPayload.saveError ? "is-error" : ""}">
+            ${overlayPayload.savedTo ? `已保存: ${overlayPayload.savedTo}` : `保存失败: ${overlayPayload.saveError || "请查看 popup 运行日志"}`}
+          </div>
+          <div class="actions">
+            <button class="copy" type="button">复制 AT</button>
+            <button class="close" type="button">关闭</button>
+          </div>
+        </div>
+      `;
+
+      const copyButton = root.querySelector(".copy");
+      const closeButtons = root.querySelectorAll(".close, .close-icon");
+
+      const copyText = async (value) => {
+        try {
+          await navigator.clipboard.writeText(value);
+          return true;
+        } catch (error) {
+          const textarea = document.createElement("textarea");
+          textarea.value = value;
+          textarea.setAttribute("readonly", "readonly");
+          textarea.style.cssText = "position: fixed; top: -9999px; left: -9999px;";
+          document.documentElement.appendChild(textarea);
+          textarea.select();
+          textarea.setSelectionRange(0, textarea.value.length);
+          const copied = document.execCommand("copy");
+          textarea.remove();
+          if (!copied) {
+            throw error;
+          }
+          return true;
+        }
+      };
+
+      copyButton?.addEventListener("click", async () => {
+        const originalText = copyButton.textContent;
+        copyButton.disabled = true;
+        copyButton.textContent = "复制中...";
+
+        try {
+          await copyText(overlayPayload.accessToken);
+          copyButton.textContent = "已复制";
+        } catch (error) {
+          copyButton.textContent = "复制失败";
+          console.error("[AT浮窗] 复制失败:", error);
+        } finally {
+          window.setTimeout(() => {
+            copyButton.disabled = false;
+            copyButton.textContent = originalText;
+          }, 1200);
+        }
+      });
+
+      closeButtons.forEach((button) => {
+        button.addEventListener("click", () => {
+          host.remove();
+        });
+      });
+
+      mountTarget.appendChild(host);
+      const rect = host.getBoundingClientRect();
+
+      return {
+        ok: true,
+        mountedTo: mountTarget.tagName,
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+        hasShadowRoot: Boolean(host.shadowRoot)
+      };
+    },
+    args: [{
+      hostId: CHATGPT_AT_FLOAT_HOST_ID,
+      accessToken: payload.accessToken,
+      userEmail: payload.userEmail,
+      savedTo: payload.savedTo,
+      saveError: payload.saveError
+    }]
+  });
+
+  const overlayResult = results?.[0]?.result;
+  if (!overlayResult?.ok) {
+    throw new Error("浮窗脚本未返回成功结果。");
+  }
+
+  await appendRuntimeLog("chatgpt_at_overlay_injected", {
+    tabId: tab.id,
+    windowId: tab.windowId,
+    mountedTo: overlayResult.mountedTo || "",
+    width: overlayResult.width || 0,
+    height: overlayResult.height || 0,
+    hasShadowRoot: overlayResult.hasShadowRoot === true
+  });
+
+  return overlayResult;
+}
+
+async function captureChatgptAccessToken(updatePhase = () => {}) {
+  const backendBaseUrl = normalizeBackendBaseUrl(backendBaseUrlInput.value);
+  const token = popupState.backendToken || "";
+
+  if (!token) {
+    throw new Error("请先点击\"刷新后端token\"。");
+  }
+
+  await appendRuntimeLog("chatgpt_at_capture_started", {
+    backendBaseUrl,
+    token,
+    targetUrl: CHATGPT_SESSION_TARGET_URL
+  });
+
+  try {
+    const tab = await openChatgptSessionTab(updatePhase);
+
+    updatePhase("提取 AT...");
+    const page = await readChatgptSessionPage(tab);
+
+    let rawText = page.textCandidates[0] || "";
+    let sessionData = null;
+    let accessToken = "";
+    let userEmail = "";
+    let expires = "";
+    let parseError = "";
+
+    try {
+      const parsed = parseChatgptSessionResponse(page.textCandidates);
+      rawText = parsed.rawText;
+      sessionData = parsed.sessionData;
+      accessToken = parsed.accessToken;
+      userEmail = parsed.userEmail;
+      expires = parsed.expires;
+    } catch (error) {
+      parseError = error.message || String(error);
+    }
+
+    await appendRuntimeLog("chatgpt_at_captured", {
+      backendBaseUrl,
+      token,
+      url: maskSensitiveUrl(page.url || tab.url || CHATGPT_SESSION_TARGET_URL),
+      tabId: tab.id,
+      windowId: tab.windowId,
+      title: page.title || tab.title || "",
+      contentType: page.contentType || "",
+      textCandidateCount: Array.isArray(page.textCandidates) ? page.textCandidates.length : 0,
+      accessToken: accessToken ? `${accessToken.slice(0, 20)}...` : "",
+      user: userEmail,
+      expires,
+      textBytes: rawText.length,
+      parseError
+    });
+
+    if (!accessToken) {
+      throw new Error(parseError || "未找到 accessToken。");
+    }
+
+    updatePhase("保存 AT...");
+    const saveResult = await saveChatgptAccessToken(backendBaseUrl, token, accessToken, userEmail);
+
+    updatePhase("注入浮窗...");
+    const overlayResult = await injectChatgptAccessTokenOverlay(tab, {
+      accessToken,
+      userEmail,
+      savedTo: saveResult.savedTo,
+      saveError: saveResult.error
+    });
+
+    updatePhase("显示页面...");
+    await chrome.tabs.update(tab.id, { active: true });
+    await chrome.windows.update(tab.windowId, { focused: true });
+
+    return {
+      tab,
+      sessionData,
+      accessToken,
+      userEmail,
+      expires,
+      savedTo: saveResult.savedTo,
+      saveError: saveResult.error,
+      overlayResult
+    };
+  } catch (error) {
+    await appendRuntimeLog("chatgpt_at_capture_failed", {
+      backendBaseUrl,
+      token,
+      targetUrl: CHATGPT_SESSION_TARGET_URL,
+      error: error.message || String(error)
+    });
+    throw error;
+  }
+}
+
 async function generateNameInfo() {
   const backendBaseUrl = normalizeBackendBaseUrl(backendBaseUrlInput.value);
   const token = popupState.backendToken || "";
@@ -1944,14 +2433,19 @@ function bindPopupActions() {
 
             button.textContent = "等待加载...";
             let attempts = 0;
+            let pageLoaded = false;
             while (attempts < 20) {
               const updatedTab = await chrome.tabs.get(tab.id);
               if (updatedTab.status === "complete") {
                 tab = updatedTab;
+                pageLoaded = true;
                 break;
               }
               await new Promise((resolve) => setTimeout(resolve, 500));
               attempts++;
+            }
+            if (!pageLoaded) {
+              throw new Error("等待 ChatGPT session 页面加载超时。");
             }
           } else {
             button.textContent = "打开页面...";
@@ -1964,14 +2458,19 @@ function bindPopupActions() {
             await new Promise((resolve) => setTimeout(resolve, 3000));
 
             let attempts = 0;
+            let pageLoaded = false;
             while (attempts < 20) {
               const updatedTab = await chrome.tabs.get(tab.id);
               if (updatedTab.status === "complete") {
                 tab = updatedTab;
+                pageLoaded = true;
                 break;
               }
               await new Promise((resolve) => setTimeout(resolve, 500));
               attempts++;
+            }
+            if (!pageLoaded) {
+              throw new Error("等待 ChatGPT session 页面加载超时。");
             }
           }
 
@@ -2093,311 +2592,16 @@ function bindPopupActions() {
 
         try {
           button.disabled = true;
-          button.textContent = "提取中...";
-
-          const backendBaseUrl = normalizeBackendBaseUrl(backendBaseUrlInput.value);
-          const token = popupState.backendToken || "";
-
-          if (!token) {
-            throw new Error("请先点击\"刷新后端token\"。");
-          }
-
-          const targetUrl = "https://chatgpt.com/api/auth/session";
-          const tabs = await chrome.tabs.query({});
-          let tab = tabs.find(t => t.url && t.url.startsWith(targetUrl));
-
-          if (tab) {
-            button.textContent = "刷新页面...";
-            await chrome.tabs.reload(tab.id);
-            await new Promise((resolve) => setTimeout(resolve, 2000));
-
-            button.textContent = "等待加载...";
-            let attempts = 0;
-            while (attempts < 20) {
-              const updatedTab = await chrome.tabs.get(tab.id);
-              if (updatedTab.status === "complete") {
-                tab = updatedTab;
-                break;
-              }
-              await new Promise((resolve) => setTimeout(resolve, 500));
-              attempts++;
-            }
-          } else {
-            button.textContent = "打开页面...";
-            tab = await chrome.tabs.create({
-              url: targetUrl,
-              active: false
-            });
-
-            button.textContent = "等待页面...";
-            await new Promise((resolve) => setTimeout(resolve, 3000));
-
-            let attempts = 0;
-            while (attempts < 20) {
-              const updatedTab = await chrome.tabs.get(tab.id);
-              if (updatedTab.status === "complete") {
-                tab = updatedTab;
-                break;
-              }
-              await new Promise((resolve) => setTimeout(resolve, 500));
-              attempts++;
-            }
-          }
-
-          button.textContent = "提取中...";
-
-          // 使用 scripting API 提取页面内容
-          const results = await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            func: () => {
-              // 尝试多种方式提取内容
-              const bodyText = document.body ? document.body.innerText : "";
-              const preText = document.querySelector("pre") ? document.querySelector("pre").innerText : "";
-              const htmlContent = document.documentElement ? document.documentElement.outerHTML : "";
-
-              return {
-                bodyText,
-                preText,
-                htmlContent,
-                url: window.location.href,
-                title: document.title
-              };
-            }
+          const result = await captureChatgptAccessToken((phase) => {
+            button.textContent = phase || "提取中...";
           });
 
-          const extractedData = results?.[0]?.result;
-
-          console.log("[按钮6] 提取的原始数据:", extractedData);
-
-          if (!extractedData) {
-            throw new Error("未能提取页面内容");
-          }
-
-          // 优先使用 pre 标签内容，其次使用 body 文本
-          let rawText = extractedData.preText || extractedData.bodyText || "";
-
-          console.log("[按钮6] 原始文本长度:", rawText.length);
-          console.log("[按钮6] 原始文本前500字符:", rawText.slice(0, 500));
-
-          let sessionData = null;
-          let accessToken = "";
-          let errorDetail = "";
-
-          try {
-            sessionData = JSON.parse(rawText);
-            accessToken = sessionData.accessToken || "";
-            console.log("[按钮6] JSON 解析成功，accessToken 长度:", accessToken.length);
-            console.log("[按钮6] sessionData keys:", Object.keys(sessionData || {}));
-          } catch (parseError) {
-            errorDetail = `JSON 解析失败: ${parseError.message}`;
-            console.error("[按钮6] JSON 解析错误:", parseError);
-            console.error("[按钮6] 尝试解析的文本:", rawText.slice(0, 1000));
-          }
-
-          await appendRuntimeLog("chatgpt_at_captured", {
-            backendBaseUrl,
-            token,
-            url: maskSensitiveUrl(targetUrl),
-            tabId: tab.id,
-            windowId: tab.windowId,
-            accessToken: accessToken ? `${accessToken.slice(0, 20)}...` : "",
-            user: sessionData?.user?.email || "",
-            expires: sessionData?.expires || "",
-            textBytes: rawText.length,
-            parseError: errorDetail
-          });
-
-          if (accessToken) {
-            // 切换到该标签页
-            await chrome.tabs.update(tab.id, { active: true });
-            await chrome.windows.update(tab.windowId, { focused: true });
-
-            console.log("[按钮6] 准备注入浮窗，accessToken 长度:", accessToken.length);
-
-            // 等待一下确保页面完全加载
-            await new Promise((resolve) => setTimeout(resolve, 500));
-
-            // 注入浮窗
-            try {
-              await chrome.scripting.executeScript({
-                target: { tabId: tab.id },
-                world: "MAIN",
-                func: (at, userEmail, backendUrl, crxToken) => {
-                  console.log("[浮窗脚本] 开始执行，AT长度:", at.length);
-                  console.log("[浮窗脚本] document.body 存在:", !!document.body);
-                  console.log("[浮窗脚本] 当前 URL:", window.location.href);
-
-                  // 移除旧浮窗
-                  const oldFloat = document.getElementById("crx-at-float");
-                  if (oldFloat) {
-                    console.log("[浮窗脚本] 移除旧浮窗");
-                    oldFloat.remove();
-                  }
-
-                  // 创建浮窗容器
-                  const floatDiv = document.createElement("div");
-                  floatDiv.id = "crx-at-float";
-
-                  // 使用内联样式，确保不被页面 CSS 覆盖
-                  floatDiv.style.cssText = `
-                    position: fixed !important;
-                    top: 20px !important;
-                    right: 20px !important;
-                    width: 320px !important;
-                    background: #ffffff !important;
-                    border: 2px solid #10a37f !important;
-                    border-radius: 12px !important;
-                    padding: 16px !important;
-                    box-shadow: 0 4px 20px rgba(0,0,0,0.15) !important;
-                    z-index: 2147483647 !important;
-                    font-family: Arial, sans-serif !important;
-                    font-size: 13px !important;
-                    color: #333 !important;
-                    display: block !important;
-                    visibility: visible !important;
-                    opacity: 1 !important;
-                  `;
-
-                  floatDiv.innerHTML = `
-                    <div style="margin-bottom: 12px !important; font-weight: bold !important; color: #10a37f !important; font-size: 14px !important;">
-                      ✓ AccessToken 已提取
-                    </div>
-                    <div style="margin-bottom: 8px !important; color: #666 !important; word-break: break-all !important; font-size: 11px !important;">
-                      账号: ${userEmail}
-                    </div>
-                    <div style="margin-bottom: 12px !important; color: #666 !important; word-break: break-all !important; font-size: 11px !important; max-height: 60px !important; overflow: auto !important; background: #f7f7f7 !important; padding: 6px !important; border-radius: 4px !important;">
-                      ${at.slice(0, 80)}...
-                    </div>
-                    <div style="display: flex !important; gap: 8px !important;">
-                      <button id="crx-copy-at" style="
-                        flex: 1 !important;
-                        height: 36px !important;
-                        background: #10a37f !important;
-                        color: white !important;
-                        border: none !important;
-                        border-radius: 6px !important;
-                        cursor: pointer !important;
-                        font-size: 13px !important;
-                        font-weight: 500 !important;
-                      ">复制 AT</button>
-                      <button id="crx-send-at" style="
-                        flex: 1 !important;
-                        height: 36px !important;
-                        background: #2563eb !important;
-                        color: white !important;
-                        border: none !important;
-                        border-radius: 6px !important;
-                        cursor: pointer !important;
-                        font-size: 13px !important;
-                        font-weight: 500 !important;
-                      ">发送后端</button>
-                    </div>
-                    <button id="crx-close-float" style="
-                      position: absolute !important;
-                      top: 8px !important;
-                      right: 8px !important;
-                      width: 24px !important;
-                      height: 24px !important;
-                      background: #f0f0f0 !important;
-                      border: none !important;
-                      border-radius: 50% !important;
-                      cursor: pointer !important;
-                      font-size: 16px !important;
-                      line-height: 1 !important;
-                      color: #666 !important;
-                    ">×</button>
-                  `;
-
-                  console.log("[浮窗脚本] 浮窗HTML已创建");
-
-                  // 强制添加到 body，即使 body 不存在也创建一个
-                  if (!document.body) {
-                    console.log("[浮窗脚本] body 不存在，创建 body");
-                    document.body = document.createElement("body");
-                    document.documentElement.appendChild(document.body);
-                  }
-
-                  document.body.appendChild(floatDiv);
-                  console.log("[浮窗脚本] 浮窗已添加到 body，元素:", floatDiv);
-                  console.log("[浮窗脚本] 浮窗位置:", floatDiv.getBoundingClientRect());
-
-                  // 复制 AT 按钮
-                  document.getElementById("crx-copy-at").addEventListener("click", async () => {
-                    console.log("[浮窗脚本] 复制按钮被点击");
-                    try {
-                      await navigator.clipboard.writeText(at);
-                      alert("AccessToken 已复制到剪贴板");
-                    } catch (err) {
-                      console.error("[浮窗脚本] 复制失败:", err);
-                      alert("复制失败：" + err.message);
-                    }
-                  });
-
-                  // 发送后端按钮
-                  document.getElementById("crx-send-at").addEventListener("click", async () => {
-                    console.log("[浮窗脚本] 发送按钮被点击");
-                    const btn = document.getElementById("crx-send-at");
-                    const originalText = btn.textContent;
-                    btn.disabled = true;
-                    btn.textContent = "发送中...";
-
-                    try {
-                      const response = await fetch(backendUrl + "api/at/save", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                          jsonrpc: "2.0",
-                          method: "at.save",
-                          params: {
-                            token: crxToken,
-                            time: new Date().toISOString(),
-                            user: userEmail,
-                            accessToken: at
-                          },
-                          id: Date.now() * 1000000 + Math.floor(Math.random() * 1000000)
-                        })
-                      });
-
-                      const result = await response.json();
-                      console.log("[浮窗脚本] 后端返回:", result);
-
-                      if (result.result?.ok) {
-                        alert("AccessToken 已保存到后端：" + (result.result.saved_to || "成功"));
-                        floatDiv.remove();
-                      } else {
-                        throw new Error(result.error?.message || "保存失败");
-                      }
-                    } catch (err) {
-                      console.error("[浮窗脚本] 发送失败:", err);
-                      alert("发送失败：" + err.message);
-                      btn.disabled = false;
-                      btn.textContent = originalText;
-                    }
-                  });
-
-                  // 关闭按钮
-                  document.getElementById("crx-close-float").addEventListener("click", () => {
-                    console.log("[浮窗脚本] 关闭按钮被点击");
-                    floatDiv.remove();
-                  });
-
-                  console.log("[浮窗脚本] 所有事件监听器已绑定");
-                },
-                args: [accessToken, sessionData?.user?.email || "", backendBaseUrl, token]
-              });
-
-              console.log("[按钮6] 浮窗注入成功");
-            } catch (injectError) {
-              console.error("[按钮6] 浮窗注入失败:", injectError);
-              setSaveStatus(`浮窗注入失败：${injectError.message}`, true);
-            }
-
-            setSaveStatus(`ChatGPT AT 已提取：${accessToken.slice(0, 30)}...（${accessToken.length} 字符）`);
+          if (result.savedTo) {
+            setSaveStatus(`ChatGPT AT 已提取并保存：${result.savedTo}`);
           } else {
-            setSaveStatus(`提取失败：${errorDetail || "未找到 accessToken"}`, true);
+            setSaveStatus(`ChatGPT AT 已提取，浮窗已显示，但保存后端失败：${result.saveError || "未知错误"}`, true);
           }
         } catch (error) {
-          console.error("[按钮6] 整体错误:", error);
           setSaveStatus(error.message || "提取网页AT失败。", true);
           if (!isRequestTimeoutError(error)) {
             console.error(error);

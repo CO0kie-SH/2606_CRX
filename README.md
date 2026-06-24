@@ -1,10 +1,10 @@
 # Chrome URL 跳转捕获扩展
 
-> 当前版本：`26.6.23A`
-> 最后更新：`2026-06-23A`
-> 插件版本：`26.6.23`
-> 插件展示版本：`26.6.23A`
-> 日志构建：`url-capture-v12`
+> 当前版本：`26.6.24A`
+> 最后更新：`2026-06-24A`
+> 插件版本：`26.6.24`
+> 插件展示版本：`26.6.24A`
+> 日志构建：`url-capture-v13`
 > 项目定位：合法合规地调试 Chrome 页面跳转链路，并通过本地 aiohttp 服务接收扩展上报、生成 CTF 地址/姓名/卡片测试数据和保存调试日志。
 
 ---
@@ -36,6 +36,7 @@
 
 | 版本 | 日期 | 说明 |
 |---|---|---|
+| `26.6.24A` | 2026-06-24A | 重构按钮6“提取网页AT”链路；拆分为“打开 session 页 / 等待完成 / 解析 JSON / 保存 AT / 注入浮窗”五段 helper；浮窗改为挂载到 `document.documentElement` 的 Shadow DOM 卡片，先注入再切换标签页，修复原先 popup 失焦后看不到浮窗的问题；新增 `chatgpt_session_*`、`chatgpt_at_overlay_injected` 等运行日志，便于后续排障 |
 | `26.6.23A` | 2026-06-23A | 新增按钮6”提取网页AT”，后台打开 ChatGPT session API 并提取 accessToken；新增后端 `/api/at/save` 接口，保存 AT 到 `db/crx-xxx/at-YYYY-MM-DD.csv`；提取成功后自动切换标签页；**已知问题**：浮窗注入功能存在兼容性问题，部分页面无法显示浮窗（console 有日志但元素不可见），建议从运行日志或控制台获取 AT |
 | `26.6.20E` | 2026-06-20E | 修正版本；插件 `version_name` 更新为 `26.6.20E`；后台日志构建更新为 `url-capture-v11`；popup 功能4恢复为”提取地址”，继续生成地址和 Luhn 测试卡，同时用新版 `JapaneseNameGenerator` 生成姓名并替换地址里的 `full_name`；popup 功能5恢复为”JS探针”，保留当前名字生成器探针能力，并备注后续可扩展关键词、触发按钮和调用栈规则研究其它 JS 方法 |
 | `26.6.20D` | 2026-06-20D | 封版版本；插件 `version_name` 更新为 `26.6.20D`；后台日志构建更新为 `url-capture-v10`；调试完成后收起按钮5“查询方法”和按钮6“生成名字”的专用功能；popup 功能4改为正式“生成名字”入口，调用本地 JSON-RPC `/api/name/generate`，返回 kanji、hiragana、romaji、meaning 等字段并写入 `log/name-YYYY-MM-DD.jsonl` |
@@ -76,7 +77,7 @@
 ## 项目结构
 
 ```text
-2606_CRX/
+<PROJECT_ROOT>/
 ├── README.md
 ├── main.py                    # aiohttp 服务启动入口，启动日志写入 log/runtime-YYYY-MM-DD.log
 ├── main.bat                   # Windows 一键启动脚本，创建 db/log 并以 0.0.0.0:8080 启动后端
@@ -222,7 +223,7 @@ http://192.168.1.15:8080/api/html/all
   - 功能3：抓取 IP 信息，自动打开/刷新 ipinfo.dkly.net 并提取城市和区域信息
   - 功能4：根据功能3返回的城市/区域提取地址信息，返回新版日本姓名和一张 Luhn 测试卡，并把地址里的姓名替换为新版姓名
   - 功能5：JS 探针，扫描页面脚本、下载同源 JS chunk，并通过运行时探针记录按钮触发后的调用栈；当前默认围绕名字生成器关键词，可继续扩展其它 JS 方法
-  - 功能6：提取网页 AT，后台打开 ChatGPT session API (`https://chatgpt.com/api/auth/session`)，提取 accessToken 并自动切换标签页；支持复制 AT 和发送到后端保存
+  - 功能6：提取网页 AT，后台打开 ChatGPT session API (`https://chatgpt.com/api/auth/session`)，提取 accessToken，自动保存到后端，并通过 Shadow DOM 浮窗展示复制入口后再切换标签页
   - 功能7-15：预留按钮，当前使用占位点击提示
 - popup 打开时读取当前标签页信息。
 - 后台记录扩展安装、浏览器启动、popup 打开等事件。
@@ -246,6 +247,9 @@ http://192.168.1.15:8080/api/html/all
 - 按钮4根据按钮3返回的 city/region_name 调用 `/api/address/from-city`，返回地址信息、`name` 字段和 `ctf_toolkit.py` 生成的 Luhn 测试卡。
 - 按钮4返回的 `address.full_name` 会替换为新版姓名生成器生成的 `kanjiFull`，`name` 字段同时包含 `kanji`、`hiragana`、`romaji`、`meaning`、`nameType`、`gender`、`effectiveGender` 和兼容旧字段。
 - 按钮5作为 JS 探针保留，当前默认扫描名字生成器相关关键词和 `Math.random` 调用栈；后续可扩展关键词、目标按钮识别和探针包装函数，用于研究其它前端 JS 方法。
+- 按钮6在后台标签页完成 session 读取、AT 保存和浮窗注入后，才切换到目标页面，避免 popup 失焦导致后续脚本中断。
+- 按钮6浮窗挂载到 `document.documentElement`，使用 Shadow DOM 隔离样式，降低被目标页面 CSS 覆盖的概率。
+- 按钮6读取 session 页面时会同时尝试 `<pre>`、`document.body.innerText` 和 `document.documentElement.textContent`，降低 JSON 解析失败概率。
 - 所有 JSONL 日志包含 `rpc_id` 字段，便于追踪完整请求链路。
 - 完整 HTML 保存为独立 `.html` 文件，避免大 HTML 写入 JSONL。
 - aiohttp 支持接收扩展上报并保存 JSONL 日志。
@@ -254,6 +258,51 @@ http://192.168.1.15:8080/api/html/all
 - aiohttp 支持地址/姓名/卡片生成接口 `/api/address/from-city`。
 - aiohttp 支持独立姓名生成接口 `/api/name/generate`。
 - aiohttp 同时兼容 REST 和 JSON-RPC 2.0 两种格式，向后兼容旧版扩展。
+
+---
+
+## 按钮6浮窗实现方法
+
+按钮6“提取网页AT”的浮窗链路，后续建议始终保持下面这套写法，避免再次出现“控制台有日志但页面看不到浮窗”的问题：
+
+1. 先把点击事件里的长流程拆成 helper，不要把“开页、等页、解析、保存、注入、切页”全部堆在一个 `if (featureId === "6")` 里。
+2. 目标页优先后台打开或后台复用，先完成数据提取和 DOM 注入，再执行 `chrome.tabs.update(..., { active: true })` 与 `chrome.windows.update(...)`。
+3. 浮窗宿主优先挂到 `document.documentElement`，不要依赖“手工创建 body 再 append”的兜底逻辑。
+4. 浮窗样式优先使用 Shadow DOM 隔离；如果不用 Shadow DOM，就必须准备一整套强隔离 CSS，并验证不会被页面全局样式覆盖。
+5. session 内容不要只信任单一来源；至少同时尝试 `<pre>`、`body.innerText`、`documentElement.textContent` 三个文本源。
+6. AT 保存后端与浮窗展示要解耦：保存失败时也要允许浮窗展示和复制，不要因为后端失败把前端可见反馈一起丢掉。
+7. 必须记录阶段性运行日志，至少包含：打开/复用 session 页、等待完成、解析结果、保存结果、浮窗注入结果、最终失败原因。
+
+当前重构后的参考实现集中在：
+
+- `chrome-extension/popup.js` 中的 `openChatgptSessionTab`
+- `chrome-extension/popup.js` 中的 `parseChatgptSessionResponse`
+- `chrome-extension/popup.js` 中的 `saveChatgptAccessToken`
+- `chrome-extension/popup.js` 中的 `injectChatgptAccessTokenOverlay`
+- `chrome-extension/popup.js` 中的 `captureChatgptAccessToken`
+
+---
+
+## 封版说明（2026-06-24A）
+
+本次围绕“26.6.24A 重构按钮6浮窗链路、修复浮窗不可见问题”完成以下更新：
+
+1. `chrome-extension/manifest.json` 的 `version` 更新为 `26.6.24`，`version_name` 更新为 `26.6.24A`。
+2. README 当前版本更新为 `26.6.24A`。
+3. 后台日志构建更新为 `url-capture-v13`。
+4. popup 功能6重构为独立 helper 流程：后台打开或复用 session 页、等待页面完成、读取文本、解析 JSON、保存 AT、注入浮窗、最后切换标签页。
+5. 功能6的浮窗改为挂载到 `document.documentElement` 的 Shadow DOM 卡片，避免被目标页面样式覆盖。
+6. 功能6不再依赖“切到前台后再注入”，改为“后台完成注入后再切页显示”，修复 popup 失焦时的链路中断问题。
+7. 功能6读取页面内容时同时尝试 `<pre>`、`body.innerText`、`document.documentElement.textContent` 三个来源，降低解析失败概率。
+8. 功能6即使后端保存失败，也会继续展示浮窗并允许复制 accessToken，避免前端反馈被后端错误吞掉。
+9. 运行日志新增 `chatgpt_session_tab_opened`、`chatgpt_session_tab_reloaded`、`chatgpt_session_ready`、`chatgpt_at_overlay_injected`、`chatgpt_at_capture_failed` 等事件，便于定位具体失败阶段。
+
+封版检查结果：
+
+- `chrome-extension/popup.js` 语法检查通过。
+- `chrome-extension/manifest.json` JSON 格式检查通过。
+- 按钮6实测可见浮窗，且可复制 accessToken。
+- 文档已补充“按钮6浮窗实现方法”，后续维护可直接按该流程复用。
 
 ---
 
@@ -614,7 +663,7 @@ https://getip.morelogin.com/black_whiteList_stop_page.html
 2. 访问 `chrome://extensions/`。
 3. 打开右上角“开发者模式”。
 4. 点击“加载已解压的扩展程序”。
-5. 选择：`D:\PycharmProjects\m202604.crx\chrome-extension`。
+5. 选择：`<PROJECT_ROOT>\chrome-extension`。
 6. 加载后刷新目标网页。
 
 如果修改了 `manifest.json` 或新增权限，需要重新刷新扩展，并接受 Chrome 的权限提示。
@@ -797,7 +846,7 @@ git diff -- README.md chrome-extension\manifest.json chrome-extension\background
 - `content.js` 不能通过 `manifest.json` 声明注入到其他扩展页面
 - `fetch()` 不支持 `chrome-extension://` 协议
 
-示例：当前扩展无法提取 `chrome-extension://kjgiepchkcgondcbnipppfnhjcndjhen/index.html` 的内容。
+示例：当前扩展无法提取 `chrome-extension://<OTHER_EXTENSION_ID>/index.html` 的内容。
 
 ### 未来方案：Chrome DevTools Protocol（CDP）
 
