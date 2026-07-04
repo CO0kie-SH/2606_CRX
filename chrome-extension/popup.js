@@ -23,6 +23,8 @@ const CHATGPT_SESSION_SETTLE_DELAY_MS = 400;
 const NAME_METHOD_MAX_SCRIPT_COUNT = 32;
 const NAME_METHOD_SNIPPET_RADIUS = 360;
 const CHATGPT_SESSION_TARGET_URL = "https://chatgpt.com/api/auth/session";
+const MAYIPS_TARGET_URL = "https://mayips.com/";
+const MAYIPS_REQUEST_TIMEOUT_MS = 12000;
 const CHATGPT_AT_FLOAT_HOST_ID = "crx-at-float-host";
 const BACKEND_BASE_URL_STORAGE_KEY = "settings.backendBaseUrl";
 const BACKEND_TOKEN_STORAGE_KEY = "settings.backendToken";
@@ -283,6 +285,82 @@ async function requestJsonRpc(targetUrl, method, params, timeoutMs = DEFAULT_REQ
   return rpcResponse.result || {};
 }
 
+function summarizeTextContent(text, maxLength = 400) {
+  const normalized = String(text || "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, maxLength)}...`;
+}
+
+async function postExternalContentReport(eventName, details = {}) {
+  const backendBaseUrl = normalizeBackendBaseUrl(backendBaseUrlInput.value);
+  const targetUrl = new URL("api/report", backendBaseUrl).toString();
+  const manifest = chrome.runtime.getManifest();
+  const payload = {
+    event_name: eventName,
+    time: new Date().toISOString(),
+    extension_version: manifest.version || "",
+    logger_build: manifest.version_name || manifest.version || "",
+    backend_base_url: backendBaseUrl,
+    details: {
+      extension_id: chrome.runtime.id,
+      extension_name: manifest.name || "",
+      extension_version_name: manifest.version_name || manifest.version || "",
+      ...details
+    }
+  };
+
+  const response = await fetchWithTimeout(targetUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  if (!response.ok) {
+    const responseText = await response.text();
+    throw new Error(`HTTP ${response.status}: ${responseText}`);
+  }
+
+  return {
+    ok: true,
+    targetUrl
+  };
+}
+
+async function fetchMayipsContent() {
+  const response = await fetchWithTimeout(MAYIPS_TARGET_URL, {
+    method: "GET",
+    cache: "no-store"
+  }, MAYIPS_REQUEST_TIMEOUT_MS);
+
+  const html = await response.text();
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${summarizeTextContent(html, 120) || "请求失败。"}`);
+  }
+
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, "text/html");
+  const title = doc.title || "";
+  const text = doc.body?.innerText || "";
+  const canonical = doc.querySelector('link[rel="canonical"]')?.getAttribute("href") || "";
+
+  return {
+    url: MAYIPS_TARGET_URL,
+    finalUrl: response.url || MAYIPS_TARGET_URL,
+    title,
+    text,
+    html,
+    canonical
+  };
+}
+
 function normalizeBackendBaseUrl(rawValue) {
   const value = String(rawValue || "").trim() || DEFAULT_BACKEND_BASE_URL;
 
@@ -488,6 +566,10 @@ function formatRuntimeLogEntry(entry, index, total) {
 
   if (details.regionName) {
     lines.push(`区域: ${details.regionName}`);
+  }
+
+  if (details.country) {
+    lines.push(`国家: ${details.country}`);
   }
 
   if (details.bytes !== undefined) {
@@ -965,7 +1047,7 @@ async function extractPageContentByFetch(tab) {
   };
 }
 
-async function postHtmlCapture(backendBaseUrl, captureType, page, tab, token) {
+async function postHtmlCapture(backendBaseUrl, captureType, page, tab, token, sourceReason = "") {
   const targetPath = captureType === "text" ? "api/html/text" : "api/html/all";
   const targetUrl = new URL(targetPath, backendBaseUrl).toString();
   const contentField = captureType === "text" ? "text" : "html";
@@ -982,7 +1064,7 @@ async function postHtmlCapture(backendBaseUrl, captureType, page, tab, token) {
       url: maskSensitiveUrl(page.url || tab.url || ""),
       tabId: tab.id ?? null,
       windowId: tab.windowId ?? null,
-      sourceReason: captureType === "text" ? "button2_text_capture" : "button2_html_capture"
+      sourceReason: sourceReason || (captureType === "text" ? "button2_text_capture" : "button2_html_capture")
     },
     [contentField]: page[contentField] || ""
   };
@@ -1041,7 +1123,7 @@ async function requestAddressFromCity(backendBaseUrl, token, ipInfo) {
     source: "button4_address_capture",
     city: ipInfo.city || "",
     region_name: ipInfo.regionName || ipInfo.region_name || "",
-    country: "JP"
+    country: ipInfo.country || "JP"
   };
 
   const result = await requestJsonRpc(targetUrl, "address.fromCity", params, ADDRESS_CAPTURE_TIMEOUT_MS);
@@ -1072,6 +1154,7 @@ async function captureAddressInfo() {
   await appendRuntimeLog("address_capture_started", {
     backendBaseUrl,
     token,
+    country: ipInfo.country || "",
     city: ipInfo.city || "",
     regionName: ipInfo.regionName || ipInfo.region_name || ""
   });
@@ -1084,6 +1167,7 @@ async function captureAddressInfo() {
       backendBaseUrl,
       token,
       targetUrl: result.targetUrl,
+      country: result.country || ipInfo.country || "",
       city: result.source_city || ipInfo.city || "",
       regionName: result.source_region_name || ipInfo.regionName || ipInfo.region_name || "",
       addressSummary,
@@ -2351,6 +2435,106 @@ async function captureCurrentPage() {
   }
 }
 
+async function captureMayipsContent() {
+  const backendBaseUrl = normalizeBackendBaseUrl(backendBaseUrlInput.value);
+  const token = popupState.backendToken || "";
+
+  if (!token) {
+    throw new Error("请先点击\"刷新后端token\"。");
+  }
+
+  await appendRuntimeLog("mayips_capture_started", {
+    backendBaseUrl,
+    token,
+    targetUrl: MAYIPS_TARGET_URL
+  });
+
+  try {
+    const page = await fetchMayipsContent();
+    const tab = {
+      id: null,
+      windowId: null,
+      title: page.title || "",
+      url: page.finalUrl || page.url || MAYIPS_TARGET_URL
+    };
+    const textBytes = new Blob([page.text || ""]).size;
+    const htmlBytes = new Blob([page.html || ""]).size;
+
+    await appendRuntimeLog("mayips_capture_fetched", {
+      backendBaseUrl,
+      token,
+      targetUrl: page.url,
+      finalUrl: page.finalUrl,
+      title: page.title,
+      canonical: page.canonical,
+      textBytes,
+      htmlBytes,
+      textPreview: summarizeTextContent(page.text, 240)
+    });
+
+    const textResult = await postHtmlCapture(
+      backendBaseUrl,
+      "text",
+      page,
+      tab,
+      token,
+      "button7_mayips_text_capture"
+    );
+
+    if (textResult.city) {
+      await saveLastIpInfo({
+        backendBaseUrl,
+        token,
+        country: textResult.country || "",
+        city: textResult.city || "",
+        regionName: textResult.region_name || "",
+        bytes: textResult.bytes || 0,
+        rpcId: textResult.rpc_id || null,
+        source: "mayips",
+        capturedAt: new Date().toISOString()
+      });
+    }
+
+    await appendRuntimeLog("mayips_capture_sent", {
+      backendBaseUrl,
+      token,
+      targetUrl: page.url,
+      finalUrl: page.finalUrl,
+      savedTo: textResult.saved_to || "",
+      rpcId: textResult.rpc_id || null,
+      country: textResult.country || null,
+      city: textResult.city || null,
+      regionName: textResult.region_name || null,
+      textBytes,
+      htmlBytes
+    });
+
+    if (textResult.city) {
+      await appendRuntimeLog("address_extract_prompt", {
+        backendBaseUrl,
+        token,
+        country: textResult.country || "",
+        city: textResult.city || "",
+        regionName: textResult.region_name || "",
+        message: "MayIP 已成功返回 country 和 city。请按按钮4（提取地址）生成地址、测试卡和新姓名。"
+      });
+    }
+
+    return {
+      page,
+      textResult
+    };
+  } catch (error) {
+    await appendRuntimeLog("mayips_capture_failed", {
+      backendBaseUrl,
+      token,
+      targetUrl: MAYIPS_TARGET_URL,
+      error: error.message || String(error)
+    });
+    throw error;
+  }
+}
+
 function bindPopupActions() {
   saveBackendUrlButton.addEventListener("click", () => {
     void saveBackendBaseUrl();
@@ -2486,6 +2670,7 @@ function bindPopupActions() {
             await saveLastIpInfo({
               backendBaseUrl,
               token,
+              country: textResult.country || "",
               city: textResult.city || "",
               regionName: textResult.region_name || "",
               bytes: textResult.bytes || 0,
@@ -2498,6 +2683,7 @@ function bindPopupActions() {
             backendBaseUrl,
             token,
             rpcId: textResult.rpc_id || null,
+            country: textResult.country || null,
             city: textResult.city || null,
             regionName: textResult.region_name || null,
             bytes: textResult.bytes
@@ -2507,13 +2693,16 @@ function bindPopupActions() {
             await appendRuntimeLog("address_extract_prompt", {
               backendBaseUrl,
               token,
+              country: textResult.country || "",
               city: textResult.city || "",
               regionName: textResult.region_name || "",
               message: "已成功返回 city。请按按钮4（提取地址）生成地址、测试卡和新姓名。"
             });
           }
 
-          if (textResult.city && textResult.region_name) {
+          if (textResult.city && textResult.region_name && textResult.country) {
+            setSaveStatus(`IP信息已保存：${textResult.country} / ${textResult.region_name} / ${textResult.city}（${textResult.bytes} 字节）`);
+          } else if (textResult.city && textResult.region_name) {
             setSaveStatus(`IP信息已保存：${textResult.region_name} / ${textResult.city}（${textResult.bytes} 字节）`);
           } else {
             setSaveStatus(`IP信息已保存：${textResult.bytes} 字节`);
@@ -2603,6 +2792,39 @@ function bindPopupActions() {
           }
         } catch (error) {
           setSaveStatus(error.message || "提取网页AT失败。", true);
+          if (!isRequestTimeoutError(error)) {
+            console.error(error);
+          }
+        } finally {
+          button.disabled = false;
+          button.textContent = originalText;
+        }
+
+        logEvent("feature_button_clicked", {
+          featureId
+        });
+        return;
+      }
+
+      if (featureId === "7") {
+        const originalText = button.textContent;
+
+        try {
+          button.disabled = true;
+          button.textContent = "抓取中...";
+          const result = await captureMayipsContent();
+          const country = result.textResult.country || "";
+          if (result.textResult.city && result.textResult.region_name && country) {
+            setSaveStatus(`MayIP信息已保存：${country} / ${result.textResult.region_name} / ${result.textResult.city}（${result.textResult.bytes} 字节）`);
+          } else if (result.textResult.city && result.textResult.region_name) {
+            setSaveStatus(`MayIP信息已保存：${result.textResult.region_name} / ${result.textResult.city}（${result.textResult.bytes} 字节）`);
+          } else if (result.textResult.city) {
+            setSaveStatus(`MayIP city 已保存：${[country, result.textResult.city].filter(Boolean).join(" / ")}（${result.textResult.bytes} 字节）`);
+          } else {
+            setSaveStatus(`MayIP页面已保存，但未提取到 city：${result.page.title || result.page.finalUrl || "完成"}。`, true);
+          }
+        } catch (error) {
+          setSaveStatus(error.message || "按钮7执行失败。", true);
           if (!isRequestTimeoutError(error)) {
             console.error(error);
           }

@@ -1,10 +1,10 @@
 # Chrome URL 跳转捕获扩展
 
-> 当前版本：`26.6.24A`
-> 最后更新：`2026-06-24A`
-> 插件版本：`26.6.24`
-> 插件展示版本：`26.6.24A`
-> 日志构建：`url-capture-v13`
+> 当前版本：`26.7.4A`
+> 最后更新：`2026-07-04A`
+> 插件版本：`26.7.4`
+> 插件展示版本：`26.7.4A`
+> 日志构建：`url-capture-v15`
 > 项目定位：合法合规地调试 Chrome 页面跳转链路，并通过本地 aiohttp 服务接收扩展上报、生成 CTF 地址/姓名/卡片测试数据和保存调试日志。
 
 ---
@@ -36,6 +36,8 @@
 
 | 版本 | 日期 | 说明 |
 |---|---|---|
+| `26.7.4A` | 2026-07-04A | 封版版本；插件 `version` 更新为 `26.7.4`，`version_name` 更新为 `26.7.4A`；后台日志构建更新为 `url-capture-v15`；popup 按钮3“抓取IP信息”和按钮4“提取地址”入口置灰禁用，功能代码和后端接口暂时保留；新增 `tmp_md/buttons_3_4_deprecation.md` 记录弃用范围、影响和恢复方式 |
+| `26.6.28A` | 2026-06-28A | 完成按钮7“MayIP信息”链路：popup 直接请求 `https://mayips.com/`，将返回文本按 JSON-RPC 上传到 `/api/html/text`；后端从 MayIP JSON 中提取 `country`、`state/region_name`、`city` 并返回前端；前端保存到 `lastIpInfo`，运行日志和状态栏显示 `country / region / city`，按钮4后续生成地址时优先使用保存的 country |
 | `26.6.24A` | 2026-06-24A | 重构按钮6“提取网页AT”链路；拆分为“打开 session 页 / 等待完成 / 解析 JSON / 保存 AT / 注入浮窗”五段 helper；浮窗改为挂载到 `document.documentElement` 的 Shadow DOM 卡片，先注入再切换标签页，修复原先 popup 失焦后看不到浮窗的问题；新增 `chatgpt_session_*`、`chatgpt_at_overlay_injected` 等运行日志，便于后续排障 |
 | `26.6.23A` | 2026-06-23A | 新增按钮6”提取网页AT”，后台打开 ChatGPT session API 并提取 accessToken；新增后端 `/api/at/save` 接口，保存 AT 到 `db/crx-xxx/at-YYYY-MM-DD.csv`；提取成功后自动切换标签页；**已知问题**：浮窗注入功能存在兼容性问题，部分页面无法显示浮窗（console 有日志但元素不可见），建议从运行日志或控制台获取 AT |
 | `26.6.20E` | 2026-06-20E | 修正版本；插件 `version_name` 更新为 `26.6.20E`；后台日志构建更新为 `url-capture-v11`；popup 功能4恢复为”提取地址”，继续生成地址和 Luhn 测试卡，同时用新版 `JapaneseNameGenerator` 生成姓名并替换地址里的 `full_name`；popup 功能5恢复为”JS探针”，保留当前名字生成器探针能力，并备注后续可扩展关键词、触发按钮和调用栈规则研究其它 JS 方法 |
@@ -202,9 +204,9 @@ http://192.168.1.15:8080/api/html/all
 | `GET` | `/api/status` | Dashboard 状态 |
 | `GET` | `/api/get_crc_token` | 生成 `crx-` + 32 位 hex token |
 | `POST` | `/api/token/create` | 用 token 和全部标签页快照创建 `db/[token].csv` |
-| `POST` | `/api/html/text` | 接收按钮2提取的页面正文文字，写入 `log/html-text-YYYY-MM-DD.jsonl` |
+| `POST` | `/api/html/text` | 接收按钮2/按钮7提取的页面正文文字，写入 `log/html-text-YYYY-MM-DD.jsonl`；文本中存在定位字段时返回 `country`、`region_name`、`city` |
 | `POST` | `/api/html/all` | 接收按钮2提取的完整页面 HTML，保存到 `db/[token]/[time].html` |
-| `POST` | `/api/address/from-city` | 根据按钮3返回的 city/region_name 生成地址、kanji/kana 配对姓名，并附带一张 `ctf_toolkit.py` 生成的 Luhn 测试卡 |
+| `POST` | `/api/address/from-city` | 保留接口；根据 city/region_name/country 生成地址、kanji/kana 配对姓名，并附带一张 `ctf_toolkit.py` 生成的 Luhn 测试卡 |
 | `POST` | `/api/name/generate` | 根据 JSON-RPC `name.generate` 生成日本测试姓名，返回 kanji、hiragana、romaji、meaning、nameType、gender 等字段 |
 | `POST` | `/api/at/save` | 接收按钮6提取的 ChatGPT accessToken，保存到 `db/[token]/at-YYYY-MM-DD.csv` |
 | `POST` | `/api/log` | 扩展日志上报原始路径 |
@@ -220,11 +222,12 @@ http://192.168.1.15:8080/api/html/all
 - popup 提供功能1到功能15，其中：
   - 功能1：刷新后端 token 并创建 CSV 登录记录和 token 文件夹
   - 功能2：提取当前活动页的页面文字和完整 HTML
-  - 功能3：抓取 IP 信息，自动打开/刷新 ipinfo.dkly.net 并提取城市和区域信息
-  - 功能4：根据功能3返回的城市/区域提取地址信息，返回新版日本姓名和一张 Luhn 测试卡，并把地址里的姓名替换为新版姓名
+  - 功能3：抓取 IP 信息入口已禁用，原功能代码保留；恢复后可自动打开/刷新 ipinfo.dkly.net 并提取城市和区域信息
+  - 功能4：提取地址入口已禁用，原功能代码保留；恢复后可根据按钮3或按钮7返回的城市/区域生成地址、姓名和 Luhn 测试卡
   - 功能5：JS 探针，扫描页面脚本、下载同源 JS chunk，并通过运行时探针记录按钮触发后的调用栈；当前默认围绕名字生成器关键词，可继续扩展其它 JS 方法
   - 功能6：提取网页 AT，后台打开 ChatGPT session API (`https://chatgpt.com/api/auth/session`)，提取 accessToken，自动保存到后端，并通过 Shadow DOM 浮窗展示复制入口后再切换标签页
-  - 功能7-15：预留按钮，当前使用占位点击提示
+  - 功能7：MayIP 信息，直接请求 mayips.com，提取 country、city、state/region_name；当前继续保留保存到 `lastIpInfo` 的行为，供后续恢复地址链路时使用
+  - 功能8-15：预留按钮，当前使用占位点击提示
 - popup 打开时读取当前标签页信息。
 - 后台记录扩展安装、浏览器启动、popup 打开等事件。
 - popup 显示运行日志面板，包含 URL 跳转记录、刷新 token 请求链路和 IP 信息抓取记录。
@@ -242,14 +245,16 @@ http://192.168.1.15:8080/api/html/all
 - 支持将按钮2提取到的页面文字上报到 `/api/html/text`，完整 HTML 上报到 `/api/html/all`。
 - 全面支持 JSON-RPC 2.0 通信协议，所有前后端接口统一使用 RPC 格式。
 - RPC ID 采用时间戳+随机数生成（时间戳×1000000+随机数），保证全局唯一性。
-- 按钮3自动打开/刷新 ipinfo.dkly.net 页面，后台加载不干扰当前浏览。
-- 按钮3自动从页面内容提取 city 和 region_name 信息，并在运行日志中显示。
-- 按钮4根据按钮3返回的 city/region_name 调用 `/api/address/from-city`，返回地址信息、`name` 字段和 `ctf_toolkit.py` 生成的 Luhn 测试卡。
-- 按钮4返回的 `address.full_name` 会替换为新版姓名生成器生成的 `kanjiFull`，`name` 字段同时包含 `kanji`、`hiragana`、`romaji`、`meaning`、`nameType`、`gender`、`effectiveGender` 和兼容旧字段。
+- 按钮3“抓取IP信息”popup 入口已禁用，原代码仍保留；恢复入口后可自动打开/刷新 ipinfo.dkly.net 页面，后台加载不干扰当前浏览。
+- 按钮3保留代码可从页面内容提取 country、city 和 region_name 信息，并在运行日志中显示。
+- 按钮4“提取地址”popup 入口已禁用，原代码仍保留；恢复入口后可根据按钮3或按钮7返回的 country、city、region_name 调用 `/api/address/from-city`，返回地址信息、`name` 字段和 `ctf_toolkit.py` 生成的 Luhn 测试卡。
+- 按钮4保留代码返回的 `address.full_name` 会替换为新版姓名生成器生成的 `kanjiFull`，`name` 字段同时包含 `kanji`、`hiragana`、`romaji`、`meaning`、`nameType`、`gender`、`effectiveGender` 和兼容旧字段。
 - 按钮5作为 JS 探针保留，当前默认扫描名字生成器相关关键词和 `Math.random` 调用栈；后续可扩展关键词、目标按钮识别和探针包装函数，用于研究其它前端 JS 方法。
 - 按钮6在后台标签页完成 session 读取、AT 保存和浮窗注入后，才切换到目标页面，避免 popup 失焦导致后续脚本中断。
 - 按钮6浮窗挂载到 `document.documentElement`，使用 Shadow DOM 隔离样式，降低被目标页面 CSS 覆盖的概率。
 - 按钮6读取 session 页面时会同时尝试 `<pre>`、`document.body.innerText` 和 `document.documentElement.textContent`，降低 JSON 解析失败概率。
+- 按钮7直接在 popup 中请求 `https://mayips.com/`，把返回文本上传到 `/api/html/text`，后端解析 `country`、`city`、`state/region_name` 后返回前端。
+- 按钮7成功后会把 MayIP 的 country、city、region_name 保存到扩展本地状态；按钮4入口当前禁用，但保留代码恢复后可直接复用这组数据生成地址。
 - 所有 JSONL 日志包含 `rpc_id` 字段，便于追踪完整请求链路。
 - 完整 HTML 保存为独立 `.html` 文件，避免大 HTML 写入 JSONL。
 - aiohttp 支持接收扩展上报并保存 JSONL 日志。
@@ -280,6 +285,55 @@ http://192.168.1.15:8080/api/html/all
 - `chrome-extension/popup.js` 中的 `saveChatgptAccessToken`
 - `chrome-extension/popup.js` 中的 `injectChatgptAccessTokenOverlay`
 - `chrome-extension/popup.js` 中的 `captureChatgptAccessToken`
+
+---
+
+## 封版说明（2026-07-04A）
+
+本次围绕“26.7.4A 封版、按钮3/按钮4入口弃用”完成以下更新：
+
+1. `chrome-extension/manifest.json` 的 `version` 更新为 `26.7.4`，`version_name` 更新为 `26.7.4A`。
+2. README 当前版本更新为 `26.7.4A`。
+3. 后台日志构建更新为 `url-capture-v15`。
+4. popup 按钮3“抓取IP信息”和按钮4“提取地址”增加 `disabled`，用户无法从 popup 直接点击。
+5. popup 增加禁用态样式，按钮3和按钮4置灰展示，并用 `title` 标明“已计划弃用，功能代码暂时保留”。
+6. 未删除 `popup.js` 中按钮3、按钮4的原功能分支，未删除 `/api/html/text`、`/api/address/from-city` 等后端接口。
+7. 新增 `tmp_md/buttons_3_4_deprecation.md`，记录弃用范围、影响、保留代码和恢复方式。
+
+封版检查结果：
+
+- `chrome-extension/background.js`、`chrome-extension/content.js`、`chrome-extension/popup.js` JavaScript 语法检查通过。
+- `chrome-extension/manifest.json` JSON 格式检查通过。
+- `main.py`、`server/app.py`、`server/runner.py`、`ctf_toolkit.py` Python 编译检查通过。
+
+恢复说明：
+
+- 如需恢复按钮3和按钮4，只需移除 `chrome-extension/popup.html` 中两个按钮的 `disabled` 属性；本次未删除对应 JavaScript 和后端代码。
+
+---
+
+## 封版说明（2026-06-28A）
+
+本次围绕“26.6.28A 完成按钮7 MayIP 信息链路，并返回 country/city/region”完成以下更新：
+
+1. `chrome-extension/manifest.json` 的 `version` 更新为 `26.6.28`，`version_name` 更新为 `26.6.28A`。
+2. README 当前版本更新为 `26.6.28A`。
+3. 后台日志构建更新为 `url-capture-v14`。
+4. popup 功能7由预留按钮改为“MayIP信息”。
+5. 功能7直接在 popup 中请求 `https://mayips.com/`，读取返回文本、HTML、标题、最终 URL 和 canonical 信息。
+6. 功能7把 MayIP 返回文本通过 JSON-RPC `html.captureText` 上传到后端 `/api/html/text`，来源标记为 `button7_mayips_text_capture`。
+7. 后端 `extract_city_from_text` 扩展为同时支持 JSON 字段和普通文本标签，能够从 MayIP 返回内容中提取 `country`、`city`、`state/region_name`。
+8. `/api/html/text` 的 JSON-RPC 返回结果新增 `country` 字段，并继续返回 `city`、`region_name`、`bytes`、`rpc_id`。
+9. popup 功能7收到 `country/city/region_name` 后写入扩展本地 `lastIpInfo`，后续功能4可直接复用。
+10. popup 运行日志新增“国家”显示，按钮7状态栏显示 `country / region / city`。
+11. 功能4生成地址时优先使用按钮3或按钮7保存的 `country`，没有 country 时回退 `JP`。
+
+封版检查结果：
+
+- `server/app.py` Python 编译检查通过。
+- `chrome-extension/popup.js` JavaScript 语法检查通过。
+- `extract_city_from_text` 已用 JSON 和文本标签样例验证，可返回 `country`、`region_name`、`city`。
+- 已实际请求 `https://mayips.com/`，确认返回体包含 `country`、`city`、`state` 字段。
 
 ---
 

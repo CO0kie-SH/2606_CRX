@@ -100,6 +100,13 @@
         background: #dbeafe;
       }
 
+      .feature-button:disabled {
+        background: #e5e7eb;
+        color: #6b7280;
+        cursor: not-allowed;
+        opacity: 0.85;
+      }
+
       .message {
         margin: 0;
         color: #444;
@@ -177,11 +184,11 @@
       <div class="button-grid">
         <button class="feature-button" data-feature="1" type="button">刷新后端token</button>
         <button class="feature-button" data-feature="2" type="button">提取页面</button>
-        <button class="feature-button" data-feature="3" type="button">抓取IP信息</button>
-        <button class="feature-button" data-feature="4" type="button">提取地址</button>
+        <button class="feature-button" data-feature="3" type="button" disabled title="已计划弃用，功能代码暂时保留">抓取IP信息</button>
+        <button class="feature-button" data-feature="4" type="button" disabled title="已计划弃用，功能代码暂时保留">提取地址</button>
         <button class="feature-button" data-feature="5" type="button">JS探针</button>
         <button class="feature-button" data-feature="6" type="button">提取网页AT</button>
-        <button class="feature-button" data-feature="7" type="button">功能7</button>
+        <button class="feature-button" data-feature="7" type="button">MayIP信息</button>
         <button class="feature-button" data-feature="8" type="button">功能8</button>
         <button class="feature-button" data-feature="9" type="button">功能9</button>
         <button class="feature-button" data-feature="10" type="button">功能10</button>

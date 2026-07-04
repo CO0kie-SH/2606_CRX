@@ -527,21 +527,122 @@ def is_jsonrpc_request(payload: dict) -> bool:
 
 def extract_city_from_text(text: str) -> dict | None:
     """
-    从文本中提取 city 和 region name 信息
-    匹配格式: "name": "Tokyo"\n        },\n        "city": "Chiyoda"
+    从页面文本中提取 city 和 region name 信息。
+    支持 ipinfo.dkly.net 的 JSON 片段，也兼容 mayips 这类普通文本标签。
     """
-    import re
+    if not isinstance(text, str) or not text.strip():
+        return None
 
     pattern = r'"name":\s*"([^"]+)"\s*\}\s*,\s*"city":\s*"([^"]+)"'
-    match = re.search(pattern, text)
+    match = re.search(pattern, text, re.IGNORECASE)
 
     if match:
         return {
             "region_name": match.group(1),
-            "city": match.group(2)
+            "city": match.group(2),
+            "country": extract_country_from_text(text),
+        }
+
+    json_country = extract_country_from_text(text)
+    json_city = extract_first_regex_value(
+        text,
+        [
+            r'"city"\s*:\s*"([^"]+)"',
+            r'"cityName"\s*:\s*"([^"]+)"',
+        ],
+    )
+    json_region = extract_first_regex_value(
+        text,
+        [
+            r'"region_name"\s*:\s*"([^"]+)"',
+            r'"regionName"\s*:\s*"([^"]+)"',
+            r'"region"\s*:\s*"([^"]+)"',
+            r'"state"\s*:\s*"([^"]+)"',
+            r'"province"\s*:\s*"([^"]+)"',
+        ],
+    )
+    if json_city:
+        return {
+            "region_name": json_region,
+            "city": json_city,
+            "country": json_country,
+        }
+
+    label_country = extract_labeled_text_value(
+        text,
+        ["country", "country code", "国家", "国家代码"]
+    )
+    label_city = extract_labeled_text_value(
+        text,
+        ["city", "city name", "城市", "市区"]
+    )
+    label_region = extract_labeled_text_value(
+        text,
+        ["region", "region name", "state", "province", "区域", "地区", "州", "省"]
+    )
+    if label_city:
+        return {
+            "region_name": label_region,
+            "city": label_city,
+            "country": label_country,
         }
 
     return None
+
+
+def extract_country_from_text(text: str) -> str:
+    return extract_first_regex_value(
+        text,
+        [
+            r'"country"\s*:\s*"([^"]+)"',
+            r'"countryCode"\s*:\s*"([^"]+)"',
+            r'"country_code"\s*:\s*"([^"]+)"',
+        ],
+    )
+
+
+def extract_first_regex_value(text: str, patterns: list[str]) -> str:
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return normalize_extracted_location_value(match.group(1))
+
+    return ""
+
+
+def extract_labeled_text_value(text: str, labels: list[str]) -> str:
+    sorted_labels = sorted(labels, key=len, reverse=True)
+    normalized_lines = [
+        re.sub(r"\s+", " ", line).strip()
+        for line in text.splitlines()
+    ]
+    normalized_lines = [line for line in normalized_lines if line]
+
+    for index, line in enumerate(normalized_lines):
+        for label in sorted_labels:
+            label_pattern = re.escape(label)
+            inline_match = re.match(
+                rf"^{label_pattern}(?:\s*[:：\-]\s*|\s+)(.+)$",
+                line,
+                re.IGNORECASE,
+            )
+            if inline_match:
+                value = normalize_extracted_location_value(inline_match.group(1))
+                if value and value.lower() != label.lower():
+                    return value
+
+            if line.lower() == label.lower() and index + 1 < len(normalized_lines):
+                value = normalize_extracted_location_value(normalized_lines[index + 1])
+                if value:
+                    return value
+
+    return ""
+
+
+def normalize_extracted_location_value(value: str) -> str:
+    cleaned = re.sub(r"<[^>]+>", " ", str(value or ""))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" \t\r\n,;|")
+    return cleaned[:128]
 
 
 async def handle_jsonrpc_html_capture(request: web.Request, payload: dict, capture_type: str) -> web.Response:
@@ -596,9 +697,11 @@ async def handle_jsonrpc_html_capture(request: web.Request, payload: dict, captu
     if city_info:
         result["city"] = city_info["city"]
         result["region_name"] = city_info["region_name"]
+        result["country"] = city_info.get("country", "")
         LOGGER.info(
-            "Extracted city info from text. rpc_id=%s city=%s region_name=%s",
+            "Extracted city info from text. rpc_id=%s country=%s city=%s region_name=%s",
             rpc_id,
+            city_info.get("country", ""),
             city_info["city"],
             city_info["region_name"],
         )
