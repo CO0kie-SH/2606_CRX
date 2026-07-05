@@ -1,10 +1,10 @@
 # Chrome URL 跳转捕获扩展
 
-> 当前版本：`26.7.4A`
-> 最后更新：`2026-07-04A`
-> 插件版本：`26.7.4`
-> 插件展示版本：`26.7.4A`
-> 日志构建：`url-capture-v15`
+> 当前版本：`26.7.5A`
+> 最后更新：`2026-07-05A`
+> 插件版本：`26.7.5`
+> 插件展示版本：`26.7.5A`
+> 日志构建：`url-capture-v16`
 > 项目定位：合法合规地调试 Chrome 页面跳转链路，并通过本地 aiohttp 服务接收扩展上报、生成 CTF 地址/姓名/卡片测试数据和保存调试日志。
 
 ---
@@ -36,6 +36,7 @@
 
 | 版本 | 日期 | 说明 |
 |---|---|---|
+| `26.7.5A` | 2026-07-05A | 封版版本；插件 `version` 更新为 `26.7.5`，`version_name` 更新为 `26.7.5A`；后台日志构建更新为 `url-capture-v16`；按钮6“提取网页AT”补齐 workspace 导出闭环，浮窗新增 workspace 列表、单项复制 AT、导出空间 AT JSON、导出 `team.csv`、`/backend-api/me` 状态回填和批量导出进度条；按钮8由占位入口升级为“城市检查”，可基于 MayIP + AddressGen 查询城市、申请地址并显示浮窗 |
 | `26.7.4A` | 2026-07-04A | 封版版本；插件 `version` 更新为 `26.7.4`，`version_name` 更新为 `26.7.4A`；后台日志构建更新为 `url-capture-v15`；popup 按钮3“抓取IP信息”和按钮4“提取地址”入口置灰禁用，功能代码和后端接口暂时保留；新增 `tmp_md/buttons_3_4_deprecation.md` 记录弃用范围、影响和恢复方式 |
 | `26.6.28A` | 2026-06-28A | 完成按钮7“MayIP信息”链路：popup 直接请求 `https://mayips.com/`，将返回文本按 JSON-RPC 上传到 `/api/html/text`；后端从 MayIP JSON 中提取 `country`、`state/region_name`、`city` 并返回前端；前端保存到 `lastIpInfo`，运行日志和状态栏显示 `country / region / city`，按钮4后续生成地址时优先使用保存的 country |
 | `26.6.24A` | 2026-06-24A | 重构按钮6“提取网页AT”链路；拆分为“打开 session 页 / 等待完成 / 解析 JSON / 保存 AT / 注入浮窗”五段 helper；浮窗改为挂载到 `document.documentElement` 的 Shadow DOM 卡片，先注入再切换标签页，修复原先 popup 失焦后看不到浮窗的问题；新增 `chatgpt_session_*`、`chatgpt_at_overlay_injected` 等运行日志，便于后续排障 |
@@ -225,9 +226,10 @@ http://192.168.1.15:8080/api/html/all
   - 功能3：抓取 IP 信息入口已禁用，原功能代码保留；恢复后可自动打开/刷新 ipinfo.dkly.net 并提取城市和区域信息
   - 功能4：提取地址入口已禁用，原功能代码保留；恢复后可根据按钮3或按钮7返回的城市/区域生成地址、姓名和 Luhn 测试卡
   - 功能5：JS 探针，扫描页面脚本、下载同源 JS chunk，并通过运行时探针记录按钮触发后的调用栈；当前默认围绕名字生成器关键词，可继续扩展其它 JS 方法
-  - 功能6：提取网页 AT，后台打开 ChatGPT session API (`https://chatgpt.com/api/auth/session`)，提取 accessToken，自动保存到后端，并通过 Shadow DOM 浮窗展示复制入口后再切换标签页
+  - 功能6：提取网页 AT，后台打开 ChatGPT session API (`https://chatgpt.com/api/auth/session`)，提取 accessToken，自动保存到后端，并在浮窗中展示 workspace 列表、复制入口和批量导出入口
   - 功能7：MayIP 信息，直接请求 mayips.com，提取 country、city、state/region_name；当前继续保留保存到 `lastIpInfo` 的行为，供后续恢复地址链路时使用
-  - 功能8-15：预留按钮，当前使用占位点击提示
+  - 功能8：城市检查，复用按钮7/MayIP 返回的 country、city、region_name，查询 AddressGen 区域列表并申请地址，最终通过浮窗展示结果
+  - 功能9-15：预留按钮，当前使用占位点击提示
 - popup 打开时读取当前标签页信息。
 - 后台记录扩展安装、浏览器启动、popup 打开等事件。
 - popup 显示运行日志面板，包含 URL 跳转记录、刷新 token 请求链路和 IP 信息抓取记录。
@@ -253,8 +255,11 @@ http://192.168.1.15:8080/api/html/all
 - 按钮6在后台标签页完成 session 读取、AT 保存和浮窗注入后，才切换到目标页面，避免 popup 失焦导致后续脚本中断。
 - 按钮6浮窗挂载到 `document.documentElement`，使用 Shadow DOM 隔离样式，降低被目标页面 CSS 覆盖的概率。
 - 按钮6读取 session 页面时会同时尝试 `<pre>`、`document.body.innerText` 和 `document.documentElement.textContent`，降低 JSON 解析失败概率。
+- 按钮6浮窗支持复制当前 AT、复制空间列表、导出 workspace AT JSON、导出 `team.csv` 兼容 CSV；批量导出期间会显示进度条，并在结束后尝试恢复原 workspace。
+- 按钮6导出 `team.csv` 时会对每个 workspace 额外请求 `/backend-api/me`，写入 `me_status_code` 和 `me_data` 两列；如果返回 `402` 且内容包含 `deactivated_workspace`，可直接据此判断停用空间。
 - 按钮7直接在 popup 中请求 `https://mayips.com/`，把返回文本上传到 `/api/html/text`，后端解析 `country`、`city`、`state/region_name` 后返回前端。
 - 按钮7成功后会把 MayIP 的 country、city、region_name 保存到扩展本地状态；按钮4入口当前禁用，但保留代码恢复后可直接复用这组数据生成地址。
+- 按钮8会复用按钮7/MayIP 的城市信息，查询 AddressGen 区域列表并申请地址；如果当前页不适合注入地址浮窗，会自动打开 MayIP 页面作为回退展示页。
 - 所有 JSONL 日志包含 `rpc_id` 字段，便于追踪完整请求链路。
 - 完整 HTML 保存为独立 `.html` 文件，避免大 HTML 写入 JSONL。
 - aiohttp 支持接收扩展上报并保存 JSONL 日志。
@@ -285,6 +290,41 @@ http://192.168.1.15:8080/api/html/all
 - `chrome-extension/popup.js` 中的 `saveChatgptAccessToken`
 - `chrome-extension/popup.js` 中的 `injectChatgptAccessTokenOverlay`
 - `chrome-extension/popup.js` 中的 `captureChatgptAccessToken`
+
+---
+
+## 按钮8城市检查链路
+
+按钮8“城市检查”当前已经从占位入口升级为可用链路，执行顺序如下：
+
+1. 先复用按钮7抓到的 `country`、`city`、`region_name`；如果缺字段，直接提示缺少前置数据。
+2. 调用 AddressGen 区域列表接口，按城市名和区域名做匹配，判断是否存在可直出的区域代码。
+3. 无论命中与否，都继续申请地址；命中时优先带上匹配到的 `area_code`，未命中时回退随机地址。
+4. 申请成功后生成地址结果浮窗，内容包含姓名、邮箱、电话、生日、州/省、城市、邮编和完整地址。
+5. 如果当前页不允许注入或注入失败，会自动打开 `https://mayips.com/` 作为回退展示页，避免结果丢失。
+6. 整个过程会写入 popup 运行日志，便于复盘“查列表 / 申请地址 / 浮窗回退”这三段行为。
+
+---
+
+## 封版说明（2026-07-05A）
+
+本次围绕“26.7.5A 封版、完成按钮6/按钮8本轮开发”完成以下更新：
+
+1. `chrome-extension/manifest.json` 的 `version` 更新为 `26.7.5`，`version_name` 更新为 `26.7.5A`。
+2. README 当前版本更新为 `26.7.5A`，最后更新日期改为 `2026-07-05A`。
+3. 后台日志构建更新为 `url-capture-v16`。
+4. popup 功能6补齐 workspace 导出闭环：AT 浮窗现在会显示 workspace 列表，支持单项复制目标 AT、复制空间列表、导出空间 AT JSON、导出 `team.csv`。
+5. 功能6导出 `team.csv` 时会为每个 workspace 额外请求 `/backend-api/me`，回填 `me_status_code` 和 `me_data` 两列，用于识别 `402 + deactivated_workspace` 的停用空间。
+6. 功能6批量导出时新增浮窗进度条，显示总数、完成数、当前阶段和恢复原 workspace 状态；批量导出期间会暂时禁用同浮窗里的其它 workspace 导出按钮。
+7. popup 功能8由占位按钮升级为“城市检查”，当前会基于 MayIP 和 AddressGen 查询城市、申请地址，并通过浮窗展示结果；当前页无法注入时，会自动打开 MayIP 页面作为回退展示页。
+8. popup 状态栏保留 `white-space: pre-line`，允许按钮6/按钮8输出多行结果说明，方便直接在 popup 中查看阶段信息。
+
+封版检查结果：
+
+- `chrome-extension/background.js`、`chrome-extension/content.js`、`chrome-extension/popup.js` JavaScript 语法检查通过。
+- `chrome-extension/manifest.json` JSON 格式检查通过。
+- `main.py`、`server/app.py`、`server/runner.py`、`ctf_toolkit.py` Python 编译检查通过。
+- 本机 `http://127.0.0.1:8080/api/status` 可正常返回状态 JSON。
 
 ---
 
@@ -738,7 +778,7 @@ https://getip.morelogin.com/black_whiteList_stop_page.html
 当前版本日志标题格式：
 
 ```text
-[My Extension v26.6.20E url-capture-v11] url_jump_recorded 2026-...
+[My Extension v26.7.5A url-capture-v16] url_jump_recorded 2026-...
 ```
 
 如果仍然看到旧格式：
@@ -797,9 +837,12 @@ https://getip.morelogin.com/black_whiteList_stop_page.html
 - 展示、复制、导出、清空运行日志
 - 功能1向 `/api/get_crc_token` 申请 token，再向 `/api/token/create` 创建 CSV 登录记录
 - 功能2提取当前活动页的页面正文文字和完整 HTML，并分别发送到 `/api/html/text` 与 `/api/html/all`
-- 功能4生成地址、Luhn 测试卡和新版日本姓名，并把地址里的姓名替换为新版姓名
+- 功能4入口当前禁用，但保留地址、Luhn 测试卡和新版日本姓名生成逻辑
 - 功能5为 JS 探针，当前默认围绕名字生成器关键词和随机调用栈，后续可扩展其它 JS 方法
-- 功能6到功能15为预留按钮，当前使用占位点击提示
+- 功能6提取 ChatGPT accessToken，展示 workspace 列表，并支持导出 workspace AT JSON 和 `team.csv`
+- 功能7抓取 MayIP 信息，写回 `country`、`city`、`region_name`
+- 功能8查询 AddressGen 城市并申请地址，结果通过浮窗展示
+- 功能9到功能15为预留按钮，当前使用占位点击提示
 - 读取当前活动标签页
 - 输出当前页面标题、URL、域名、tab ID、窗口 ID 等信息
 - 将 popup 打开事件发送给后台日志
@@ -864,11 +907,11 @@ Get-Content -Raw .\chrome-extension\manifest.json | ConvertFrom-Json | Out-Null
 本次会话主要变更集中在：
 
 - `README.md`：项目说明文档
-- `chrome-extension/manifest.json`：版本为 `26.6.20`，展示版本为 `26.6.20E`，包含导航捕获所需权限
+- `chrome-extension/manifest.json`：版本为 `26.7.5`，展示版本为 `26.7.5A`，包含导航捕获所需权限
 - `chrome-extension/background.js`：负责后台日志、导航捕获、版本输出和加载上报
 - `chrome-extension/content.js`：负责页面内 URL 变化采集
 - `chrome-extension/popup.html`：负责 popup 布局、功能1到功能15和运行日志面板
-- `chrome-extension/popup.js`：负责地址配置、功能按钮、运行日志展示、刷新 token、CSV 创建请求和页面内容提取上报
+- `chrome-extension/popup.js`：负责地址配置、功能按钮、运行日志展示、刷新 token、页面内容提取、按钮6 workspace 导出和按钮8城市检查
 - `server/app.py`：负责 Dashboard、地址/姓名/卡片生成接口、扩展上报接口、token 生成、CSV 创建接口和页面内容接收接口
 - `main.py`：负责初始化控制台和文件日志
 

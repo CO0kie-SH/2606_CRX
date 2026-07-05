@@ -11,6 +11,7 @@ const urlLoggerCopyButton = document.getElementById("url-logger-copy");
 const urlLoggerExportButton = document.getElementById("url-logger-export");
 const urlLoggerClearButton = document.getElementById("url-logger-clear");
 const REDACTED_VALUE = "[REDACTED]";
+const POPUP_BUILD = "release-26.7.5A-button6-button8";
 const DEFAULT_BACKEND_BASE_URL = "http://127.0.0.1:8080/";
 const DEFAULT_REQUEST_TIMEOUT_MS = 3000;
 const HTML_TEXT_UPLOAD_TIMEOUT_MS = 10000;
@@ -20,12 +21,19 @@ const NAME_GENERATE_TIMEOUT_MS = 10000;
 const NAME_METHOD_SCAN_TIMEOUT_MS = 12000;
 const CHATGPT_SESSION_TIMEOUT_MS = 20000;
 const CHATGPT_SESSION_SETTLE_DELAY_MS = 400;
+const CHATGPT_BACKEND_API_BASE_URL = "https://chatgpt.com/";
+const CHATGPT_BACKEND_API_TIMEOUT_MS = 15000;
+const CHATGPT_WORKSPACE_LIST_DISPLAY_LIMIT = 80;
 const NAME_METHOD_MAX_SCRIPT_COUNT = 32;
 const NAME_METHOD_SNIPPET_RADIUS = 360;
 const CHATGPT_SESSION_TARGET_URL = "https://chatgpt.com/api/auth/session";
 const MAYIPS_TARGET_URL = "https://mayips.com/";
 const MAYIPS_REQUEST_TIMEOUT_MS = 12000;
+const ADDRESSGEN_API_BASE_URL = "https://addressgen.top/api/v1/";
+const ADDRESSGEN_REQUEST_TIMEOUT_MS = 12000;
+const ADDRESSGEN_FALLBACK_TAB_TIMEOUT_MS = 15000;
 const CHATGPT_AT_FLOAT_HOST_ID = "crx-at-float-host";
+const ADDRESSGEN_ADDRESS_FLOAT_HOST_ID = "crx-addressgen-address-float-host";
 const BACKEND_BASE_URL_STORAGE_KEY = "settings.backendBaseUrl";
 const BACKEND_TOKEN_STORAGE_KEY = "settings.backendToken";
 const IP_CAPTURE_STORAGE_KEY = "settings.lastIpCapture";
@@ -135,6 +143,60 @@ function getHostname(url) {
     return new URL(url).hostname;
   } catch (error) {
     return "";
+  }
+}
+
+function isUuidLike(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || ""));
+}
+
+function decodeBase64UrlJson(value) {
+  const normalized = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized.padEnd(normalized.length + ((4 - normalized.length % 4) % 4), "=");
+  const binary = atob(padded);
+  const jsonText = decodeURIComponent(
+    Array.from(binary, (ch) => `%${ch.charCodeAt(0).toString(16).padStart(2, "0")}`).join("")
+  );
+
+  return JSON.parse(jsonText);
+}
+
+function decodeChatgptAccessTokenClaims(accessToken) {
+  const parts = String(accessToken || "").split(".");
+  if (parts.length < 2) {
+    return {
+      ok: false,
+      error: "access token is not a JWT"
+    };
+  }
+
+  try {
+    const rawClaims = decodeBase64UrlJson(parts[1]);
+    const profile = rawClaims?.["https://api.openai.com/profile"] || {};
+    const auth = rawClaims?.["https://api.openai.com/auth"] || {};
+
+    return {
+      ok: true,
+      email: typeof profile.email === "string" ? profile.email.trim() : "",
+      phone: typeof profile.phone_number === "string" ? profile.phone_number.trim() : "",
+      planType: typeof auth.chatgpt_plan_type === "string" ? auth.chatgpt_plan_type.trim() : "",
+      accountId: typeof auth.chatgpt_account_id === "string" ? auth.chatgpt_account_id.trim() : "",
+      accountUserId: typeof auth.chatgpt_account_user_id === "string" ? auth.chatgpt_account_user_id.trim() : "",
+      userId: typeof auth.chatgpt_user_id === "string"
+        ? auth.chatgpt_user_id.trim()
+        : (typeof auth.user_id === "string" ? auth.user_id.trim() : ""),
+      clientId: typeof rawClaims.client_id === "string" ? rawClaims.client_id.trim() : "",
+      issuer: typeof rawClaims.iss === "string" ? rawClaims.iss.trim() : "",
+      issuedAt: rawClaims.iat ?? null,
+      expiresAt: rawClaims.exp ?? null,
+      scopes: Array.isArray(rawClaims.scp) ? rawClaims.scp : [],
+      rawClaims
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message || String(error)
+    };
   }
 }
 
@@ -340,15 +402,42 @@ async function fetchMayipsContent() {
     cache: "no-store"
   }, MAYIPS_REQUEST_TIMEOUT_MS);
 
-  const html = await response.text();
+  const responseText = await response.text();
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${summarizeTextContent(html, 120) || "请求失败。"}`);
+    throw new Error(`HTTP ${response.status}: ${summarizeTextContent(responseText, 120) || "请求失败。"}`);
+  }
+
+  let mayipsJson = null;
+  try {
+    mayipsJson = responseText ? JSON.parse(responseText) : null;
+  } catch (error) {
+    mayipsJson = null;
+  }
+
+  if (mayipsJson && typeof mayipsJson === "object" && !Array.isArray(mayipsJson)) {
+    const title = [
+      "MayIP",
+      mayipsJson.country || "",
+      mayipsJson.state || "",
+      mayipsJson.city || ""
+    ].filter(Boolean).join(" / ");
+
+    return {
+      url: MAYIPS_TARGET_URL,
+      finalUrl: response.url || MAYIPS_TARGET_URL,
+      title,
+      text: responseText,
+      html: responseText,
+      canonical: "",
+      contentType: response.headers.get("content-type") || "",
+      json: mayipsJson
+    };
   }
 
   const parser = new DOMParser();
-  const doc = parser.parseFromString(html, "text/html");
+  const doc = parser.parseFromString(responseText, "text/html");
   const title = doc.title || "";
-  const text = doc.body?.innerText || "";
+  const text = doc.body?.innerText || responseText;
   const canonical = doc.querySelector('link[rel="canonical"]')?.getAttribute("href") || "";
 
   return {
@@ -356,8 +445,10 @@ async function fetchMayipsContent() {
     finalUrl: response.url || MAYIPS_TARGET_URL,
     title,
     text,
-    html,
-    canonical
+    html: responseText,
+    canonical,
+    contentType: response.headers.get("content-type") || "",
+    json: null
   };
 }
 
@@ -536,6 +627,10 @@ function formatRuntimeLogEntry(entry, index, total) {
     lines.push(`标题: ${details.title}`);
   }
 
+  if (details.contentType) {
+    lines.push(`内容类型: ${details.contentType}`);
+  }
+
   if (details.status) {
     lines.push(`状态: ${details.status}`);
   }
@@ -572,12 +667,28 @@ function formatRuntimeLogEntry(entry, index, total) {
     lines.push(`国家: ${details.country}`);
   }
 
+  if (details.jsonCountry || details.jsonState || details.jsonCity) {
+    lines.push(`MayIP JSON: ${[
+      details.jsonCountry || "",
+      details.jsonState || "",
+      details.jsonCity || ""
+    ].filter(Boolean).join(" / ")}`);
+  }
+
+  if (details.stage) {
+    lines.push(`阶段: ${details.stage}`);
+  }
+
   if (details.bytes !== undefined) {
     lines.push(`字节数: ${details.bytes}`);
   }
 
   if (details.error) {
     lines.push(`错误: ${details.error}`);
+  }
+
+  if (details.sourceError) {
+    lines.push(`来源错误: ${details.sourceError}`);
   }
 
   if (details.message) {
@@ -590,6 +701,30 @@ function formatRuntimeLogEntry(entry, index, total) {
 
   if (details.addressName) {
     lines.push(`姓名: ${details.addressName}`);
+  }
+
+  if (details.personEmail) {
+    lines.push(`邮箱: ${details.personEmail}`);
+  }
+
+  if (details.personBirthday) {
+    lines.push(`生日: ${details.personBirthday}`);
+  }
+
+  if (details.personGender) {
+    lines.push(`性别: ${details.personGender}`);
+  }
+
+  if (details.generatedCity) {
+    lines.push(`生成城市: ${details.generatedCity}`);
+  }
+
+  if (details.addressState) {
+    lines.push(`州/省: ${details.addressState}`);
+  }
+
+  if (details.addressAreaCode) {
+    lines.push(`区域代码: ${details.addressAreaCode}`);
   }
 
   if (details.kanaName) {
@@ -698,6 +833,38 @@ function formatRuntimeLogEntry(entry, index, total) {
 
   if (details.expires) {
     lines.push(`过期时间: ${details.expires}`);
+  }
+
+  if (details.planType) {
+    lines.push(`计划: ${details.planType}`);
+  }
+
+  if (details.accountId) {
+    lines.push(`当前空间ID: ${details.accountId}`);
+  }
+
+  if (details.workspaceCount !== undefined) {
+    lines.push(`空间数量: ${details.workspaceCount}`);
+  }
+
+  if (details.workspaceDetailCount !== undefined) {
+    lines.push(`空间详情数量: ${details.workspaceDetailCount}`);
+  }
+
+  if (details.workspacePreview) {
+    lines.push(`空间预览: ${details.workspacePreview}`);
+  }
+
+  if (details.workspaceIds) {
+    lines.push(`空间ID: ${details.workspaceIds}`);
+  }
+
+  if (details.workspaceError) {
+    lines.push(`空间错误: ${details.workspaceError}`);
+  }
+
+  if (details.hasDeactivatedWorkspaceHint !== undefined) {
+    lines.push(`停用提示: ${details.hasDeactivatedWorkspaceHint ? "是" : "否"}`);
   }
 
   if (details.parseError) {
@@ -1365,6 +1532,186 @@ async function readChatgptSessionPage(tab) {
   return page;
 }
 
+function generateChatgptDeviceId() {
+  try {
+    if (globalThis.crypto?.randomUUID) {
+      return globalThis.crypto.randomUUID();
+    }
+  } catch (error) {
+    // Ignore and fall back to a simple UUID-like value.
+  }
+
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (char) => {
+    const value = Math.floor(Math.random() * 16);
+    const digit = char === "x" ? value : ((value & 0x3) | 0x8);
+    return digit.toString(16);
+  });
+}
+
+function collectWorkspaceIdsFromAny(value, out = new Set(), seen = new WeakSet()) {
+  if (!value || typeof value !== "object") {
+    return out;
+  }
+
+  if (seen.has(value)) {
+    return out;
+  }
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectWorkspaceIdsFromAny(item, out, seen);
+    }
+    return out;
+  }
+
+  for (const [key, child] of Object.entries(value)) {
+    if (key === "id" && typeof child === "string" && isUuidLike(child)) {
+      out.add(child);
+    }
+    collectWorkspaceIdsFromAny(child, out, seen);
+  }
+
+  return out;
+}
+
+function getChatgptWorkspaceItems(data) {
+  const candidates = [
+    data?.data?.items,
+    data?.items,
+    data?.data?.accounts,
+    data?.accounts
+  ];
+
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) {
+      return candidate;
+    }
+  }
+
+  return [];
+}
+
+function pickFirstString(...values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  return "";
+}
+
+function normalizeChatgptWorkspaceItem(item, currentAccountId) {
+  const id = pickFirstString(item?.id, item?.account_id, item?.account?.id);
+
+  return {
+    id,
+    name: pickFirstString(item?.name, item?.display_name, item?.title, item?.account?.name),
+    type: pickFirstString(item?.structure, item?.type, item?.account?.structure, item?.account?.type),
+    role: pickFirstString(item?.current_user_role, item?.role, item?.account_user_role, item?.membership?.role),
+    processor: pickFirstString(item?.processor, item?.billing?.processor, item?.subscription?.processor),
+    createdTime: item?.created_time ?? item?.createdAt ?? item?.created_at ?? "",
+    eligibleForAutoReactivation: item?.eligible_for_auto_reactivation === true,
+    isCurrent: Boolean(currentAccountId && id && id === currentAccountId)
+  };
+}
+
+function extractChatgptWorkspaceInfo(data, currentAccountId = "") {
+  const workspaceIds = Array.from(collectWorkspaceIdsFromAny(data));
+  const workspaceItems = getChatgptWorkspaceItems(data);
+  const byId = new Map();
+
+  for (const item of workspaceItems) {
+    const workspace = normalizeChatgptWorkspaceItem(item, currentAccountId);
+    if (!isUuidLike(workspace.id)) {
+      continue;
+    }
+
+    byId.set(workspace.id, workspace);
+  }
+
+  for (const id of workspaceIds) {
+    if (!byId.has(id)) {
+      byId.set(id, {
+        id,
+        name: "",
+        type: "",
+        role: "",
+        processor: "",
+        createdTime: "",
+        eligibleForAutoReactivation: false,
+        isCurrent: Boolean(currentAccountId && id === currentAccountId)
+      });
+    }
+  }
+
+  const workspaces = Array.from(byId.values()).map((workspace, index) => ({
+    ...workspace,
+    index: index + 1
+  }));
+
+  return {
+    workspaceIds,
+    workspaces,
+    workspaceCount: workspaceIds.length,
+    workspaceItemCount: workspaceItems.length,
+    workspaceDetailCount: workspaces.length
+  };
+}
+
+function summarizeWorkspaceList(workspaces, limit = 5) {
+  return workspaces
+    .slice(0, limit)
+    .map((workspace) => [
+      workspace.isCurrent ? "当前" : "",
+      workspace.name || workspace.id,
+      workspace.role || "",
+      workspace.type || ""
+    ].filter(Boolean).join(" / "))
+    .join("; ");
+}
+
+async function fetchChatgptWorkspaceAccounts(accessToken, currentAccountId = "") {
+  const targetUrl = new URL("backend-api/accounts", CHATGPT_BACKEND_API_BASE_URL).toString();
+  const response = await fetchWithTimeout(targetUrl, {
+    method: "GET",
+    cache: "no-store",
+    headers: {
+      "Accept": "application/json",
+      "Authorization": `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+      "OAI-Device-Id": generateChatgptDeviceId()
+    }
+  }, CHATGPT_BACKEND_API_TIMEOUT_MS);
+  const responseText = await response.text();
+  let data = null;
+
+  try {
+    data = responseText ? JSON.parse(responseText) : {};
+  } catch (error) {
+    throw new Error(`空间接口 JSON 解析失败: ${error.message || String(error)}`);
+  }
+
+  if (!response.ok) {
+    const errorMessage = typeof data?.error === "string"
+      ? data.error
+      : (typeof data?.detail === "string" ? data.detail : "");
+    throw new Error(errorMessage || `空间接口 HTTP ${response.status}`);
+  }
+
+  const workspaceInfo = extractChatgptWorkspaceInfo(data, currentAccountId);
+
+  return {
+    targetUrl,
+    status: response.status,
+    contentType: response.headers.get("content-type") || "",
+    textLength: responseText.length,
+    hasDeactivatedWorkspaceHint: responseText.includes("deactivated_workspace"),
+    ...workspaceInfo
+  };
+}
+
 async function saveChatgptAccessToken(backendBaseUrl, token, accessToken, userEmail) {
   const saveTargetUrl = new URL("api/at/save", backendBaseUrl).toString();
 
@@ -1440,13 +1787,81 @@ async function injectChatgptAccessTokenOverlay(tab, payload) {
         "position: fixed !important",
         "top: 24px !important",
         "right: 24px !important",
-        "width: 360px !important",
+        "width: 720px !important",
         "max-width: calc(100vw - 32px) !important",
         "z-index: 2147483647 !important",
         "pointer-events: auto !important"
       ].join(";");
 
       const root = host.attachShadow ? host.attachShadow({ mode: "open" }) : host;
+      const escapeHtml = (value) => String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+      const workspaces = Array.isArray(overlayPayload.workspaces) ? overlayPayload.workspaces : [];
+      const workspaceIds = Array.isArray(overlayPayload.workspaceIds) ? overlayPayload.workspaceIds : [];
+      const workspaceCount = Number.isFinite(overlayPayload.workspaceCount)
+        ? overlayPayload.workspaceCount
+        : workspaceIds.length;
+      const workspaceListText = [
+        ["index", "current", "name", "type", "role", "processor", "workspace_id"].join("\t"),
+        ...workspaces.map((workspace) => [
+          workspace.index || "",
+          workspace.isCurrent ? "true" : "",
+          workspace.name || "",
+          workspace.type || "",
+          workspace.role || "",
+          workspace.processor || "",
+          workspace.id || ""
+        ].join("\t"))
+      ].join("\n");
+      const denseClass = workspaces.length > overlayPayload.workspaceDisplayLimit ? " is-dense" : "";
+      const workspaceRows = workspaces.map((workspace) => `
+        <tr class="${workspace.isCurrent ? "is-current" : ""}">
+          <td class="index">${escapeHtml(workspace.index || "")}</td>
+          <td class="name">
+            <div class="workspace-name">${escapeHtml(workspace.name || "-")}</div>
+            ${workspace.isCurrent ? '<div class="tag">当前</div>' : ""}
+          </td>
+          <td>${escapeHtml(workspace.type || "-")}</td>
+          <td>${escapeHtml(workspace.role || "-")}</td>
+          <td>${escapeHtml(workspace.processor || "-")}</td>
+          <td class="id">${escapeHtml(workspace.id || "-")}</td>
+          <td class="action">
+            <button class="workspace-at" type="button" data-workspace-id="${escapeHtml(workspace.id || "")}">复制AT</button>
+            <div class="workspace-at-status"></div>
+          </td>
+        </tr>
+      `).join("");
+      const workspaceSection = overlayPayload.workspaceError
+        ? `<div class="workspace-status is-error">空间查询失败: ${escapeHtml(overlayPayload.workspaceError)}</div>`
+        : `
+          <div class="workspace-summary">
+            <span>空间 ${escapeHtml(workspaceCount)}</span>
+            <span>详情 ${escapeHtml(workspaces.length)}</span>
+            ${overlayPayload.hasDeactivatedWorkspaceHint ? '<span class="warn">含停用提示</span>' : ""}
+          </div>
+          <div class="workspace-list${denseClass}">
+            ${workspaceRows ? `
+              <table>
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>名称</th>
+                    <th>类型</th>
+                    <th>角色</th>
+                    <th>处理器</th>
+                    <th>Workspace ID</th>
+                    <th>目标AT</th>
+                  </tr>
+                </thead>
+                <tbody>${workspaceRows}</tbody>
+              </table>
+            ` : '<div class="empty">接口返回中未提取到 workspace。</div>'}
+          </div>
+        `;
       root.innerHTML = `
         <style>
           :host {
@@ -1462,6 +1877,8 @@ async function injectChatgptAccessTokenOverlay(tab, payload) {
             border-radius: 14px;
             box-shadow: 0 18px 40px rgba(15, 23, 42, 0.24);
             padding: 18px 16px 16px;
+            max-height: calc(100vh - 48px);
+            overflow: auto;
           }
           .title {
             margin: 0 28px 12px 0;
@@ -1487,7 +1904,7 @@ async function injectChatgptAccessTokenOverlay(tab, payload) {
             font-size: 12px;
             line-height: 1.5;
             word-break: break-all;
-            max-height: 96px;
+            max-height: 82px;
             overflow: auto;
           }
           .status {
@@ -1500,9 +1917,201 @@ async function injectChatgptAccessTokenOverlay(tab, payload) {
           .status.is-error {
             color: #b91c1c;
           }
+          .workspace-title {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin: 14px 0 8px;
+            font-size: 13px;
+            font-weight: 700;
+            color: #0f172a;
+          }
+          .workspace-summary {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin: 0 0 8px;
+            color: #475569;
+            font-size: 12px;
+          }
+          .workspace-summary span {
+            display: inline-flex;
+            align-items: center;
+            height: 22px;
+            padding: 0 8px;
+            border-radius: 999px;
+            background: #eef6f3;
+            color: #065f46;
+          }
+          .workspace-summary .warn {
+            background: #fef3c7;
+            color: #92400e;
+          }
+          .workspace-status {
+            margin: 0 0 12px;
+            padding: 9px 10px;
+            border-radius: 9px;
+            background: #f8fafc;
+            color: #475569;
+            font-size: 12px;
+            line-height: 1.5;
+            word-break: break-all;
+          }
+          .workspace-status.is-error {
+            background: #fef2f2;
+            color: #b91c1c;
+          }
+          .workspace-list {
+            max-height: 280px;
+            overflow: auto;
+            border: 1px solid #dbe4ee;
+            border-radius: 10px;
+            background: #ffffff;
+          }
+          .workspace-list.is-dense {
+            max-height: 340px;
+          }
+          table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11px;
+            line-height: 1.35;
+          }
+          th,
+          td {
+            box-sizing: border-box;
+            padding: 7px 8px;
+            border-bottom: 1px solid #e5edf4;
+            vertical-align: top;
+            text-align: left;
+          }
+          th {
+            position: sticky;
+            top: 0;
+            z-index: 1;
+            background: #f8fafc;
+            color: #475569;
+            font-weight: 700;
+          }
+          tr.is-current td {
+            background: #ecfdf5;
+          }
+          .index {
+            width: 34px;
+            color: #64748b;
+            white-space: nowrap;
+          }
+          .name {
+            min-width: 118px;
+          }
+          .workspace-name {
+            color: #0f172a;
+            font-weight: 600;
+            word-break: break-word;
+          }
+          .tag {
+            display: inline-block;
+            margin-top: 4px;
+            padding: 1px 6px;
+            border-radius: 999px;
+            background: #10a37f;
+            color: #ffffff;
+            font-size: 10px;
+            line-height: 1.5;
+          }
+          .id {
+            min-width: 230px;
+            font-family: Consolas, "Courier New", monospace;
+            word-break: break-all;
+            color: #334155;
+          }
+          .action {
+            min-width: 108px;
+          }
+          .workspace-at {
+            height: 28px;
+            padding: 0 9px;
+            border-radius: 8px;
+            background: #2563eb;
+            color: #ffffff;
+            font-size: 12px;
+            white-space: nowrap;
+          }
+          .workspace-at:disabled {
+            opacity: 0.7;
+            cursor: default;
+          }
+          .workspace-at-status {
+            margin-top: 4px;
+            color: #64748b;
+            font-size: 10px;
+            line-height: 1.35;
+            word-break: break-word;
+          }
+          .workspace-at-status.is-error {
+            color: #b91c1c;
+          }
+          .empty {
+            padding: 12px;
+            color: #64748b;
+            font-size: 12px;
+          }
+          .progress-panel {
+            margin-top: 12px;
+            padding: 10px 12px;
+            border: 1px solid #dbe4ee;
+            border-radius: 10px;
+            background: #f8fafc;
+          }
+          .progress-panel.is-hidden {
+            display: none;
+          }
+          .progress-panel.is-error .progress-fill {
+            background: #dc2626;
+          }
+          .progress-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 8px;
+            font-size: 12px;
+            line-height: 1.4;
+          }
+          .progress-title {
+            color: #0f172a;
+            font-weight: 700;
+          }
+          .progress-count {
+            color: #475569;
+            white-space: nowrap;
+          }
+          .progress-track {
+            height: 8px;
+            border-radius: 999px;
+            overflow: hidden;
+            background: #e2e8f0;
+          }
+          .progress-fill {
+            height: 100%;
+            width: 0%;
+            border-radius: inherit;
+            background: linear-gradient(90deg, #2563eb, #10a37f);
+            transition: width 180ms ease;
+          }
+          .progress-detail {
+            margin-top: 8px;
+            color: #64748b;
+            font-size: 11px;
+            line-height: 1.45;
+            word-break: break-word;
+          }
           .actions {
             display: flex;
             gap: 8px;
+            flex-wrap: wrap;
+            margin-top: 12px;
           }
           button {
             appearance: none;
@@ -1515,8 +2124,19 @@ async function injectChatgptAccessTokenOverlay(tab, payload) {
             font-weight: 600;
           }
           .copy {
-            flex: 1;
             background: #10a37f;
+            color: #ffffff;
+          }
+          .copy-workspaces {
+            background: #2563eb;
+            color: #ffffff;
+          }
+          .export-workspaces-at {
+            background: #7c3aed;
+            color: #ffffff;
+          }
+          .export-team-csv {
+            background: #0f766e;
             color: #ffffff;
           }
           .close {
@@ -1540,20 +2160,60 @@ async function injectChatgptAccessTokenOverlay(tab, payload) {
         <div class="card">
           <button class="close-icon" type="button" title="关闭">×</button>
           <div class="title">AccessToken 已提取</div>
-          <div class="meta">账号: ${overlayPayload.userEmail || "-"}</div>
-          <div class="token">${overlayPayload.accessToken}</div>
+          <div class="meta">账号: ${escapeHtml(overlayPayload.userEmail || "-")}</div>
+          <div class="token">${escapeHtml(overlayPayload.accessToken)}</div>
           <div class="status ${overlayPayload.saveError ? "is-error" : ""}">
-            ${overlayPayload.savedTo ? `已保存: ${overlayPayload.savedTo}` : `保存失败: ${overlayPayload.saveError || "请查看 popup 运行日志"}`}
+            ${overlayPayload.savedTo
+              ? `已保存: ${escapeHtml(overlayPayload.savedTo)}`
+              : `保存失败: ${escapeHtml(overlayPayload.saveError || "请查看 popup 运行日志")}`}
+          </div>
+          <div class="workspace-title">
+            <span>Workspace 列表</span>
+          </div>
+          ${workspaceSection}
+          <div class="progress-panel is-hidden">
+            <div class="progress-head">
+              <div class="progress-title">批量导出进度</div>
+              <div class="progress-count">0/0</div>
+            </div>
+            <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <div class="progress-fill"></div>
+            </div>
+            <div class="progress-detail"></div>
           </div>
           <div class="actions">
-            <button class="copy" type="button">复制 AT</button>
+            <button class="copy copy-at" type="button">复制 AT</button>
+            <button class="copy-workspaces" type="button">复制空间列表</button>
+            <button class="export-workspaces-at" type="button">导出空间AT</button>
+            <button class="export-team-csv" type="button">导出 team.csv</button>
             <button class="close" type="button">关闭</button>
           </div>
         </div>
       `;
 
-      const copyButton = root.querySelector(".copy");
+      const copyButton = root.querySelector(".copy-at");
+      const copyWorkspacesButton = root.querySelector(".copy-workspaces");
+      const exportWorkspacesAtButton = root.querySelector(".export-workspaces-at");
+      const exportTeamCsvButton = root.querySelector(".export-team-csv");
+      const workspaceAtButtons = root.querySelectorAll(".workspace-at");
       const closeButtons = root.querySelectorAll(".close, .close-icon");
+      const progressPanel = root.querySelector(".progress-panel");
+      const progressTitle = root.querySelector(".progress-title");
+      const progressCount = root.querySelector(".progress-count");
+      const progressTrack = root.querySelector(".progress-track");
+      const progressFill = root.querySelector(".progress-fill");
+      const progressDetail = root.querySelector(".progress-detail");
+      const workspaceById = new Map(workspaces.map((workspace) => [workspace.id, workspace]));
+      const workspaceTokenCache = new Map();
+      const originalWorkspaceId = String(overlayPayload.currentAccountId || "").toLowerCase();
+      const knownWorkspaceIds = Array.from(new Set(
+        [
+          ...(Array.isArray(workspaceIds) ? workspaceIds : []),
+          ...workspaces.map((workspace) => workspace?.id || "")
+        ]
+          .map((value) => String(value || "").trim())
+          .filter(Boolean)
+      ));
 
       const copyText = async (value) => {
         try {
@@ -1576,6 +2236,37 @@ async function injectChatgptAccessTokenOverlay(tab, payload) {
         }
       };
 
+      const setBatchActionButtonsDisabled = (disabled) => {
+        exportWorkspacesAtButton.disabled = disabled;
+        exportTeamCsvButton.disabled = disabled;
+        workspaceAtButtons.forEach((button) => {
+          button.disabled = disabled;
+        });
+      };
+
+      const setProgressState = ({
+        visible = true,
+        title = "批量导出进度",
+        completed = 0,
+        total = 0,
+        detail = "",
+        isError = false
+      } = {}) => {
+        if (!progressPanel || !progressTitle || !progressCount || !progressTrack || !progressFill || !progressDetail) {
+          return;
+        }
+
+        progressPanel.classList.toggle("is-hidden", !visible);
+        progressPanel.classList.toggle("is-error", Boolean(isError));
+        progressTitle.textContent = title;
+        progressCount.textContent = `${completed}/${total}`;
+        const safeTotal = total > 0 ? total : 1;
+        const percent = Math.max(0, Math.min(100, Math.round((completed / safeTotal) * 100)));
+        progressFill.style.width = `${percent}%`;
+        progressTrack.setAttribute("aria-valuenow", String(percent));
+        progressDetail.textContent = detail || "";
+      };
+
       copyButton?.addEventListener("click", async () => {
         const originalText = copyButton.textContent;
         copyButton.disabled = true;
@@ -1593,6 +2284,541 @@ async function injectChatgptAccessTokenOverlay(tab, payload) {
             copyButton.textContent = originalText;
           }, 1200);
         }
+      });
+
+      copyWorkspacesButton?.addEventListener("click", async () => {
+        const originalText = copyWorkspacesButton.textContent;
+        copyWorkspacesButton.disabled = true;
+        copyWorkspacesButton.textContent = "复制中...";
+
+        try {
+          await copyText(workspaceListText);
+          copyWorkspacesButton.textContent = "已复制";
+        } catch (error) {
+          copyWorkspacesButton.textContent = "复制失败";
+          console.error("[AT浮窗] 复制空间列表失败:", error);
+        } finally {
+          window.setTimeout(() => {
+            copyWorkspacesButton.disabled = false;
+            copyWorkspacesButton.textContent = originalText;
+          }, 1200);
+        }
+      });
+
+      const decodeJwtClaims = (accessToken) => {
+        const parts = String(accessToken || "").split(".");
+        if (parts.length < 2) {
+          throw new Error("access token is not a JWT");
+        }
+
+        const normalized = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+        const padded = normalized.padEnd(normalized.length + ((4 - normalized.length % 4) % 4), "=");
+        const jsonText = decodeURIComponent(
+          Array.from(atob(padded), (ch) => `%${ch.charCodeAt(0).toString(16).padStart(2, "0")}`).join("")
+        );
+        return JSON.parse(jsonText);
+      };
+
+      const generateDeviceId = () => {
+        try {
+          if (globalThis.crypto?.randomUUID) {
+            return globalThis.crypto.randomUUID();
+          }
+        } catch (error) {
+          // Ignore and fall back to a UUID-like string.
+        }
+
+        return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (char) => {
+          const value = Math.floor(Math.random() * 16);
+          const digit = char === "x" ? value : ((value & 0x3) | 0x8);
+          return digit.toString(16);
+        });
+      };
+
+      const stringifyApiData = (value) => {
+        if (value === undefined || value === null) {
+          return "";
+        }
+
+        if (typeof value === "string") {
+          return value;
+        }
+
+        try {
+          return JSON.stringify(value);
+        } catch (error) {
+          return String(value);
+        }
+      };
+
+      const fetchWorkspaceMeSnapshot = async (accessToken) => {
+        const response = await fetch("/backend-api/me", {
+          method: "GET",
+          credentials: "include",
+          cache: "no-store",
+          headers: {
+            "accept": "application/json",
+            "authorization": `Bearer ${accessToken}`,
+            "oai-device-id": generateDeviceId()
+          }
+        });
+        const responseText = await response.text();
+        let data = responseText;
+
+        try {
+          data = responseText ? JSON.parse(responseText) : {};
+        } catch (error) {
+          data = responseText;
+        }
+
+        return {
+          statusCode: response.status,
+          dataText: stringifyApiData(data),
+          isDeactivatedWorkspace: stringifyApiData(data).includes("deactivated_workspace")
+        };
+      };
+
+      const buildWorkspaceAtRecord = (workspace, sessionData) => {
+        const accessToken = typeof sessionData?.accessToken === "string" ? sessionData.accessToken.trim() : "";
+        if (!accessToken) {
+          throw new Error("目标 Session 未返回 accessToken。");
+        }
+
+        const claims = decodeJwtClaims(accessToken);
+        const profile = claims?.["https://api.openai.com/profile"] || {};
+        const auth = claims?.["https://api.openai.com/auth"] || {};
+        const accountId = typeof auth.chatgpt_account_id === "string" ? auth.chatgpt_account_id.trim() : "";
+        const expectedId = String(workspace.id || "").toLowerCase();
+        const email = typeof profile.email === "string" ? profile.email.trim() : (sessionData?.user?.email || "");
+        const phone = typeof profile.phone_number === "string" ? profile.phone_number.trim() : "";
+        const userId = typeof auth.chatgpt_user_id === "string"
+          ? auth.chatgpt_user_id.trim()
+          : (typeof auth.user_id === "string" ? auth.user_id.trim() : "");
+        const accountUserId = typeof auth.chatgpt_account_user_id === "string"
+          ? auth.chatgpt_account_user_id.trim()
+          : "";
+        const sub = typeof claims.sub === "string" ? claims.sub.trim() : "";
+        const domain = email.includes("@") ? email.split("@").pop().toLowerCase() : "";
+        const iat = claims.iat ?? "";
+        const exp = claims.exp ?? "";
+        const jti = typeof claims.jti === "string" ? claims.jti.trim() : "";
+        const isSignup = auth?.is_signup ?? claims?.is_signup ?? "";
+
+        if (!accountId || accountId.toLowerCase() !== expectedId) {
+          throw new Error(`目标工作区校验失败: ${accountId || "-"}`);
+        }
+
+        return {
+          workspace_id: workspace.id,
+          workspace_name: workspace.name || "",
+          workspace_type: workspace.type || "",
+          workspace_role: workspace.role || "",
+          workspace_processor: workspace.processor || "",
+          email,
+          phone,
+          domain,
+          plan_type: typeof auth.chatgpt_plan_type === "string" ? auth.chatgpt_plan_type.trim() : "",
+          account_id: accountId,
+          account_user_id: accountUserId,
+          chatgpt_user_id: userId,
+          user_id: userId,
+          sub,
+          iat,
+          exp,
+          jti,
+          is_signup: isSignup,
+          expires: typeof sessionData?.expires === "string" ? sessionData.expires : "",
+          access_token: accessToken,
+          exported_at: new Date().toISOString()
+        };
+      };
+
+      const exchangeWorkspaceSession = async (workspace, options = {}) => {
+        if (!workspace?.id) {
+          throw new Error("缺少 workspace ID。");
+        }
+
+        if (!options.forceFetch && workspaceTokenCache.has(workspace.id)) {
+          return workspaceTokenCache.get(workspace.id);
+        }
+
+        const targetPath = `/api/auth/session?exchange_workspace_token=true&workspace_id=${encodeURIComponent(workspace.id)}&reason=setCurrentAccount`;
+        const response = await fetch(targetPath, {
+          method: "GET",
+          credentials: "include",
+          cache: "no-store",
+          headers: {
+            "accept": "*/*"
+          }
+        });
+        const responseText = await response.text();
+        let sessionData = null;
+
+        try {
+          sessionData = responseText ? JSON.parse(responseText) : {};
+        } catch (error) {
+          throw new Error(`Session JSON 解析失败: ${error.message || String(error)}`);
+        }
+
+        if (!response.ok) {
+          const errorMessage = typeof sessionData?.error === "string"
+            ? sessionData.error
+            : (typeof sessionData?.message === "string" ? sessionData.message : "");
+          throw new Error(errorMessage || `Session HTTP ${response.status}`);
+        }
+
+        const record = buildWorkspaceAtRecord(workspace, sessionData);
+        let meStatusCode = "";
+        let meDataText = "";
+        let meDeactivatedWorkspace = false;
+
+        try {
+          const meSnapshot = await fetchWorkspaceMeSnapshot(record.access_token);
+          meStatusCode = meSnapshot.statusCode;
+          meDataText = meSnapshot.dataText;
+          meDeactivatedWorkspace = meSnapshot.isDeactivatedWorkspace;
+        } catch (error) {
+          meDataText = `ME_FETCH_ERROR: ${error.message || String(error)}`;
+        }
+
+        const enrichedRecord = {
+          ...record,
+          me_status_code: meStatusCode,
+          me_data: meDataText,
+          me_is_deactivated_workspace: meDeactivatedWorkspace
+        };
+        workspaceTokenCache.set(workspace.id, enrichedRecord);
+        return enrichedRecord;
+      };
+
+      const restoreOriginalWorkspaceSession = async (lastWorkspaceId = "") => {
+        if (!originalWorkspaceId || String(lastWorkspaceId || "").toLowerCase() === originalWorkspaceId) {
+          return {
+            ok: true,
+            skipped: true
+          };
+        }
+
+        const originalWorkspace = workspaceById.get(originalWorkspaceId) || {
+          id: originalWorkspaceId,
+          name: "original"
+        };
+
+        try {
+          await exchangeWorkspaceSession(originalWorkspace, {
+            forceFetch: true
+          });
+          return {
+            ok: true,
+            skipped: false
+          };
+        } catch (error) {
+          console.warn("[AT浮窗] 恢复原 workspace 失败:", error);
+          return {
+            ok: false,
+            skipped: false,
+            error: error.message || String(error)
+          };
+        }
+      };
+
+      const setWorkspaceAtStatus = (button, text, isError = false) => {
+        const status = button?.closest(".action")?.querySelector(".workspace-at-status");
+        if (!status) {
+          return;
+        }
+        status.textContent = text || "";
+        status.classList.toggle("is-error", Boolean(isError));
+      };
+
+      const copyWorkspaceAt = async (button) => {
+        const workspace = workspaceById.get(button?.dataset?.workspaceId || "");
+        if (!workspace) {
+          throw new Error("未找到 workspace。");
+        }
+
+        const originalText = button.textContent;
+        button.disabled = true;
+        button.textContent = "获取中...";
+        setWorkspaceAtStatus(button, "交换 Session...");
+
+        try {
+          const record = await exchangeWorkspaceSession(workspace);
+          await copyText(record.access_token);
+          button.textContent = "已复制";
+          setWorkspaceAtStatus(button, "已复制，恢复中...");
+          const restoreResult = await restoreOriginalWorkspaceSession(workspace.id);
+          setWorkspaceAtStatus(
+            button,
+            restoreResult.ok ? "已校验并复制" : `已复制；恢复失败: ${restoreResult.error}`,
+            !restoreResult.ok
+          );
+        } catch (error) {
+          button.textContent = "失败";
+          setWorkspaceAtStatus(button, error.message || String(error), true);
+        } finally {
+          window.setTimeout(() => {
+            button.disabled = false;
+            button.textContent = originalText;
+          }, 1400);
+        }
+      };
+
+      const downloadTextFile = (filename, content, contentType) => {
+        const blob = new Blob([content], {
+          type: contentType
+        });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = filename;
+        document.documentElement.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      };
+
+      const downloadJson = (filename, payload) => {
+        downloadTextFile(filename, JSON.stringify(payload, null, 2), "application/json");
+      };
+
+      const escapeCsvCell = (value) => {
+        const text = String(value ?? "");
+        return `"${text.replace(/"/g, "\"\"")}"`;
+      };
+
+      const buildTeamCsvText = (records) => {
+        const headers = [
+          "access_token",
+          "email",
+          "phone",
+          "plan_type",
+          "account_id",
+          "workspace_id",
+          "domain",
+          "user_id",
+          "sub",
+          "iat",
+          "exp",
+          "jti",
+          "is_signup",
+          "me_status_code",
+          "me_data"
+        ];
+        const workspaceIdValue = knownWorkspaceIds.join(";");
+        const rows = [
+          headers,
+          ...records
+            .filter((record) => record.ok)
+            .map((record) => [
+              record.access_token || "",
+              record.email || "",
+              record.phone || "",
+              record.plan_type || "",
+              record.account_id || "",
+              workspaceIdValue,
+              record.domain || "",
+              record.user_id || record.chatgpt_user_id || "",
+              record.sub || "",
+              record.iat || "",
+              record.exp || "",
+              record.jti || "",
+              record.is_signup ?? "",
+              record.me_status_code ?? "",
+              record.me_data || ""
+            ])
+        ];
+
+        return rows
+          .map((row) => row.map((value) => escapeCsvCell(value)).join(","))
+          .join("\n");
+      };
+
+      const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+      const collectAllWorkspaceAtRecords = async (onProgress = () => {}) => {
+        const records = [];
+        const total = workspaces.length;
+
+        onProgress({
+          completed: 0,
+          total,
+          detail: total > 0 ? "准备开始批量导出..." : "没有可导出的 workspace。"
+        });
+
+        if (total === 0) {
+          return {
+            records,
+            successCount: 0,
+            restoreResult: {
+              ok: true,
+              skipped: true
+            }
+          };
+        }
+
+        let successCount = 0;
+        let completed = 0;
+
+        for (const workspace of workspaces) {
+          const workspaceLabel = workspace.name || workspace.id || "workspace";
+          onProgress({
+            completed,
+            total,
+            detail: `正在处理：${workspaceLabel}`
+          });
+
+          try {
+            const record = await exchangeWorkspaceSession(workspace);
+            records.push({
+              ok: true,
+              ...record
+            });
+            successCount += 1;
+          } catch (error) {
+            records.push({
+              ok: false,
+              workspace_id: workspace.id || "",
+              workspace_name: workspace.name || "",
+              error: error.message || String(error)
+            });
+          }
+
+          completed += 1;
+          onProgress({
+            completed,
+            total,
+            detail: `已完成 ${completed}/${total}，成功 ${successCount}，失败 ${completed - successCount}`
+          });
+
+          if (workspaces.length > 1 && completed < total) {
+            await sleep(1000);
+          }
+        }
+
+        const lastOkRecord = [...records].reverse().find((record) => record.ok);
+        onProgress({
+          completed: total,
+          total,
+          detail: "正在恢复原 workspace..."
+        });
+        const restoreResult = await restoreOriginalWorkspaceSession(lastOkRecord?.workspace_id || "");
+
+        onProgress({
+          completed: total,
+          total,
+          detail: restoreResult.ok
+            ? `导出完成，成功 ${successCount}/${total}`
+            : `导出完成，成功 ${successCount}/${total}；恢复失败：${restoreResult.error || "未知错误"}`,
+          isError: !restoreResult.ok
+        });
+
+        return {
+          records,
+          successCount,
+          restoreResult
+        };
+      };
+
+      const exportAllWorkspaceAt = async () => {
+        const originalText = exportWorkspacesAtButton.textContent;
+        setBatchActionButtonsDisabled(true);
+        exportWorkspacesAtButton.textContent = "导出中...";
+
+        try {
+          const { records, successCount, restoreResult } = await collectAllWorkspaceAtRecords((progress) => {
+            setProgressState({
+              visible: true,
+              title: "导出空间AT",
+              completed: progress.completed,
+              total: progress.total,
+              detail: progress.detail,
+              isError: Boolean(progress.isError)
+            });
+          });
+          const payload = {
+            exported_at: new Date().toISOString(),
+            source_email: overlayPayload.userEmail || "",
+            restored_original_workspace: restoreResult.ok,
+            restore_error: restoreResult.ok ? "" : (restoreResult.error || ""),
+            total: records.length,
+            success_count: successCount,
+            failed_count: records.length - successCount,
+            accounts: records
+          };
+          const filename = `chatgpt_workspace_at_${successCount}_${Date.now()}.json`;
+          downloadJson(filename, payload);
+          exportWorkspacesAtButton.textContent = `已导出 ${successCount}`;
+        } catch (error) {
+          exportWorkspacesAtButton.textContent = "导出失败";
+          setProgressState({
+            visible: true,
+            title: "导出空间AT",
+            completed: 0,
+            total: workspaces.length,
+            detail: error.message || String(error),
+            isError: true
+          });
+          console.error("[AT浮窗] 导出空间AT失败:", error);
+        } finally {
+          window.setTimeout(() => {
+            setBatchActionButtonsDisabled(false);
+            exportWorkspacesAtButton.textContent = originalText;
+          }, 1600);
+        }
+      };
+
+      const exportWorkspaceTeamCsv = async () => {
+        const originalText = exportTeamCsvButton.textContent;
+        setBatchActionButtonsDisabled(true);
+        exportTeamCsvButton.textContent = "导出中...";
+
+        try {
+          const { records, successCount } = await collectAllWorkspaceAtRecords((progress) => {
+            setProgressState({
+              visible: true,
+              title: "导出 team.csv",
+              completed: progress.completed,
+              total: progress.total,
+              detail: progress.detail,
+              isError: Boolean(progress.isError)
+            });
+          });
+          const csvText = buildTeamCsvText(records);
+          const filename = `team_workspace_at_${successCount}_${Date.now()}.csv`;
+          downloadTextFile(filename, csvText, "text/csv;charset=utf-8");
+          exportTeamCsvButton.textContent = `已导出 ${successCount}`;
+        } catch (error) {
+          exportTeamCsvButton.textContent = "导出失败";
+          setProgressState({
+            visible: true,
+            title: "导出 team.csv",
+            completed: 0,
+            total: workspaces.length,
+            detail: error.message || String(error),
+            isError: true
+          });
+          console.error("[AT浮窗] 导出 team.csv 失败:", error);
+        } finally {
+          window.setTimeout(() => {
+            setBatchActionButtonsDisabled(false);
+            exportTeamCsvButton.textContent = originalText;
+          }, 1600);
+        }
+      };
+
+      workspaceAtButtons.forEach((button) => {
+        button.addEventListener("click", () => {
+          void copyWorkspaceAt(button);
+        });
+      });
+
+      exportWorkspacesAtButton?.addEventListener("click", () => {
+        void exportAllWorkspaceAt();
+      });
+
+      exportTeamCsvButton?.addEventListener("click", () => {
+        void exportWorkspaceTeamCsv();
       });
 
       closeButtons.forEach((button) => {
@@ -1616,8 +2842,15 @@ async function injectChatgptAccessTokenOverlay(tab, payload) {
       hostId: CHATGPT_AT_FLOAT_HOST_ID,
       accessToken: payload.accessToken,
       userEmail: payload.userEmail,
+      currentAccountId: payload.currentAccountId,
       savedTo: payload.savedTo,
-      saveError: payload.saveError
+      saveError: payload.saveError,
+      workspaces: payload.workspaces,
+      workspaceIds: payload.workspaceIds,
+      workspaceCount: payload.workspaceCount,
+      workspaceError: payload.workspaceError,
+      workspaceDisplayLimit: CHATGPT_WORKSPACE_LIST_DISPLAY_LIMIT,
+      hasDeactivatedWorkspaceHint: payload.hasDeactivatedWorkspaceHint
     }]
   });
 
@@ -1632,7 +2865,10 @@ async function injectChatgptAccessTokenOverlay(tab, payload) {
     mountedTo: overlayResult.mountedTo || "",
     width: overlayResult.width || 0,
     height: overlayResult.height || 0,
-    hasShadowRoot: overlayResult.hasShadowRoot === true
+    hasShadowRoot: overlayResult.hasShadowRoot === true,
+    workspaceCount: Array.isArray(payload.workspaceIds) ? payload.workspaceIds.length : 0,
+    workspaceDetailCount: Array.isArray(payload.workspaces) ? payload.workspaces.length : 0,
+    workspaceError: payload.workspaceError || ""
   });
 
   return overlayResult;
@@ -1664,6 +2900,10 @@ async function captureChatgptAccessToken(updatePhase = () => {}) {
     let userEmail = "";
     let expires = "";
     let parseError = "";
+    let tokenClaims = {
+      ok: false,
+      error: ""
+    };
 
     try {
       const parsed = parseChatgptSessionResponse(page.textCandidates);
@@ -1674,6 +2914,13 @@ async function captureChatgptAccessToken(updatePhase = () => {}) {
       expires = parsed.expires;
     } catch (error) {
       parseError = error.message || String(error);
+    }
+
+    if (accessToken) {
+      tokenClaims = decodeChatgptAccessTokenClaims(accessToken);
+      if (tokenClaims.ok && !userEmail && tokenClaims.email) {
+        userEmail = tokenClaims.email;
+      }
     }
 
     await appendRuntimeLog("chatgpt_at_captured", {
@@ -1688,8 +2935,10 @@ async function captureChatgptAccessToken(updatePhase = () => {}) {
       accessToken: accessToken ? `${accessToken.slice(0, 20)}...` : "",
       user: userEmail,
       expires,
+      accountId: tokenClaims.ok ? tokenClaims.accountId : "",
+      planType: tokenClaims.ok ? tokenClaims.planType : "",
       textBytes: rawText.length,
-      parseError
+      parseError: parseError || (!tokenClaims.ok && accessToken ? tokenClaims.error : "")
     });
 
     if (!accessToken) {
@@ -1699,12 +2948,66 @@ async function captureChatgptAccessToken(updatePhase = () => {}) {
     updatePhase("保存 AT...");
     const saveResult = await saveChatgptAccessToken(backendBaseUrl, token, accessToken, userEmail);
 
+    const workspaceTargetUrl = new URL("backend-api/accounts", CHATGPT_BACKEND_API_BASE_URL).toString();
+    let workspaceResult = {
+      targetUrl: workspaceTargetUrl,
+      workspaces: [],
+      workspaceIds: [],
+      workspaceCount: 0,
+      workspaceDetailCount: 0,
+      hasDeactivatedWorkspaceHint: false,
+      error: ""
+    };
+
+    updatePhase("查询空间...");
+    await appendRuntimeLog("chatgpt_workspace_fetch_started", {
+      targetUrl: workspaceTargetUrl,
+      user: userEmail,
+      accountId: tokenClaims.ok ? tokenClaims.accountId : ""
+    });
+
+    try {
+      workspaceResult = await fetchChatgptWorkspaceAccounts(
+        accessToken,
+        tokenClaims.ok ? tokenClaims.accountId : ""
+      );
+
+      await appendRuntimeLog("chatgpt_workspace_fetch_succeeded", {
+        targetUrl: workspaceResult.targetUrl,
+        user: userEmail,
+        accountId: tokenClaims.ok ? tokenClaims.accountId : "",
+        status: workspaceResult.status,
+        contentType: workspaceResult.contentType,
+        textBytes: workspaceResult.textLength,
+        workspaceCount: workspaceResult.workspaceCount,
+        workspaceDetailCount: workspaceResult.workspaceDetailCount,
+        workspacePreview: summarizeWorkspaceList(workspaceResult.workspaces),
+        workspaceIds: workspaceResult.workspaceIds.slice(0, 10).join(", "),
+        hasDeactivatedWorkspaceHint: workspaceResult.hasDeactivatedWorkspaceHint
+      });
+    } catch (error) {
+      workspaceResult.error = error.message || String(error);
+
+      await appendRuntimeLog("chatgpt_workspace_fetch_failed", {
+        targetUrl: workspaceTargetUrl,
+        user: userEmail,
+        accountId: tokenClaims.ok ? tokenClaims.accountId : "",
+        error: workspaceResult.error
+      });
+    }
+
     updatePhase("注入浮窗...");
     const overlayResult = await injectChatgptAccessTokenOverlay(tab, {
       accessToken,
       userEmail,
+      currentAccountId: tokenClaims.ok ? tokenClaims.accountId : "",
       savedTo: saveResult.savedTo,
-      saveError: saveResult.error
+      saveError: saveResult.error,
+      workspaces: workspaceResult.workspaces,
+      workspaceIds: workspaceResult.workspaceIds,
+      workspaceCount: workspaceResult.workspaceCount,
+      workspaceError: workspaceResult.error,
+      hasDeactivatedWorkspaceHint: workspaceResult.hasDeactivatedWorkspaceHint
     });
 
     updatePhase("显示页面...");
@@ -1717,8 +3020,10 @@ async function captureChatgptAccessToken(updatePhase = () => {}) {
       accessToken,
       userEmail,
       expires,
+      tokenClaims,
       savedTo: saveResult.savedTo,
       saveError: saveResult.error,
+      workspaceResult,
       overlayResult
     };
   } catch (error) {
@@ -2467,6 +3772,10 @@ async function captureMayipsContent() {
       finalUrl: page.finalUrl,
       title: page.title,
       canonical: page.canonical,
+      contentType: page.contentType,
+      jsonCountry: page.json?.country || "",
+      jsonState: page.json?.state || "",
+      jsonCity: page.json?.city || "",
       textBytes,
       htmlBytes,
       textPreview: summarizeTextContent(page.text, 240)
@@ -2535,6 +3844,682 @@ async function captureMayipsContent() {
   }
 }
 
+function normalizeAddressgenAreaKey(value) {
+  return String(value || "")
+    .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function indexAddressgenAreas(areas) {
+  const index = new Map();
+
+  for (const area of areas) {
+    for (const fieldName of ["area_code", "slug", "full_name"]) {
+      const key = normalizeAddressgenAreaKey(area?.[fieldName]);
+
+      if (!key || index.has(key)) {
+        continue;
+      }
+
+      index.set(key, {
+        area,
+        fieldName
+      });
+    }
+  }
+
+  return index;
+}
+
+async function fetchAddressgenAreas(countryCode) {
+  const targetUrl = new URL("areas", ADDRESSGEN_API_BASE_URL);
+  targetUrl.searchParams.set("country_code", countryCode);
+  targetUrl.searchParams.set("lang", "en");
+
+  const data = await requestJson(targetUrl.toString(), {
+    method: "GET",
+    cache: "no-store"
+  }, ADDRESSGEN_REQUEST_TIMEOUT_MS);
+
+  if (data.code !== "200" || !Array.isArray(data.data)) {
+    throw new Error(data.message || `AddressGen 未返回 ${countryCode} 的城市列表。`);
+  }
+
+  return {
+    targetUrl: targetUrl.toString(),
+    areas: data.data
+  };
+}
+
+function matchAddressgenArea(ipInfo, areas) {
+  const areaIndex = indexAddressgenAreas(areas);
+  const city = String(ipInfo.city || "").trim();
+  const regionName = String(ipInfo.regionName || ipInfo.region_name || "").trim();
+  const cityKey = normalizeAddressgenAreaKey(city);
+  const regionKey = normalizeAddressgenAreaKey(regionName);
+  const cityMatch = cityKey ? areaIndex.get(cityKey) || null : null;
+  const regionMatch = regionKey ? areaIndex.get(regionKey) || null : null;
+  const selectedMatch = cityMatch || regionMatch || null;
+
+  return {
+    city,
+    regionName,
+    cityKey,
+    regionKey,
+    cityInList: Boolean(cityMatch),
+    regionInList: Boolean(regionMatch),
+    matchBy: cityMatch ? "city" : regionMatch ? "region_name" : "",
+    area: selectedMatch?.area || null,
+    fieldName: selectedMatch?.fieldName || ""
+  };
+}
+
+function buildAddressgenCityCheckMessage(matchResult) {
+  const cityName = matchResult.city || "未知城市";
+  const firstLine = `"${cityName}"是否在列表中：${matchResult.cityInList ? "是" : "否"}`;
+
+  if (matchResult.cityInList) {
+    return `${firstLine}\n可以生成对应城市地址`;
+  }
+
+  if (matchResult.regionInList) {
+    const areaCode = matchResult.area?.area_code || "";
+    const areaName = matchResult.area?.full_name || matchResult.regionName || "";
+    const suffix = [areaName, areaCode].filter(Boolean).join(" / ");
+
+    return `${firstLine}\n可以生成对应城市地址\n匹配方式：区域 ${suffix}`;
+  }
+
+  return `${firstLine}\n不支持城市，只支持随机地址`;
+}
+
+function formatAddressgenAddressSummary(address) {
+  if (!address || typeof address !== "object") {
+    return "";
+  }
+
+  return address.full_address_local
+    || address.full_address_intl
+    || [
+      address.street || "",
+      address.city || "",
+      address.state || "",
+      address.zipcode || "",
+      address.country || ""
+    ].filter(Boolean).join(", ");
+}
+
+function formatAddressgenPersonName(addressData) {
+  return [
+    addressData?.firstname || "",
+    addressData?.lastname || ""
+  ].filter(Boolean).join(" ");
+}
+
+async function requestAddressgenAddress(countryCode, matchResult) {
+  const targetUrl = new URL("address", ADDRESSGEN_API_BASE_URL);
+  const areaCode = matchResult?.area?.area_code || "";
+
+  targetUrl.searchParams.set("country_code", countryCode);
+  if (areaCode) {
+    targetUrl.searchParams.set("area_code", areaCode);
+  }
+
+  const data = await requestJson(targetUrl.toString(), {
+    method: "GET",
+    cache: "no-store"
+  }, ADDRESSGEN_REQUEST_TIMEOUT_MS);
+
+  if (data.code !== "200" || !data.data) {
+    throw new Error(data.message || `AddressGen 未返回 ${countryCode} 的地址。`);
+  }
+
+  return {
+    targetUrl: targetUrl.toString(),
+    areaCode,
+    mode: areaCode ? "area" : "random",
+    data: data.data
+  };
+}
+
+function buildAddressgenAddressOverlayPayload({ country, city, regionName, matchResult, message, addressResult }) {
+  const addressData = addressResult.data || {};
+  const address = addressData.address || {};
+  const personName = formatAddressgenPersonName(addressData);
+  const fullAddress = formatAddressgenAddressSummary(address);
+  const matchedArea = matchResult.area || {};
+  const matchLabel = matchResult.matchBy
+    ? `${matchResult.matchBy} -> ${[matchedArea.full_name, matchedArea.area_code].filter(Boolean).join(" / ")}`
+    : "未匹配，使用随机地址";
+  const rows = [
+    ["IP城市", city || "-"],
+    ["IP区域", regionName || "-"],
+    ["匹配", matchLabel],
+    ["姓名", personName || "-"],
+    ["邮箱", addressData.email || "-"],
+    ["电话", addressData.phone || "-"],
+    ["生日", addressData.birthday || "-"],
+    ["性别", addressData.gender || "-"],
+    ["国家", [address.country || "", address.country_code || country || ""].filter(Boolean).join(" / ") || "-"],
+    ["州/省", address.state || "-"],
+    ["城市", address.city || "-"],
+    ["邮编", address.zipcode || "-"],
+    ["区域代码", address.area_code || addressResult.areaCode || "-"],
+    ["街道", address.street_name || address.street || "-"],
+    ["门牌号", address.building_number || "-"]
+  ];
+  const copyText = [
+    message,
+    "",
+    `姓名: ${personName || "-"}`,
+    `邮箱: ${addressData.email || "-"}`,
+    `电话: ${addressData.phone || "-"}`,
+    `生日: ${addressData.birthday || "-"}`,
+    `性别: ${addressData.gender || "-"}`,
+    `国家: ${address.country || "-"} / ${address.country_code || country || "-"}`,
+    `州/省: ${address.state || "-"}`,
+    `城市: ${address.city || "-"}`,
+    `邮编: ${address.zipcode || "-"}`,
+    `街道: ${address.street_name || address.street || "-"}`,
+    `门牌号: ${address.building_number || "-"}`,
+    `完整地址: ${fullAddress || "-"}`
+  ].join("\n");
+
+  return {
+    hostId: ADDRESSGEN_ADDRESS_FLOAT_HOST_ID,
+    title: "AddressGen 地址已申请",
+    message,
+    requestUrl: addressResult.targetUrl,
+    rows,
+    fullAddress,
+    copyText
+  };
+}
+
+async function injectAddressgenAddressOverlay(tab, payload) {
+  if (tab.id === undefined || tab.id === null) {
+    throw new Error("当前标签页缺少 tabId，无法注入地址浮窗。");
+  }
+
+  const results = await chrome.scripting.executeScript({
+    target: {
+      tabId: tab.id
+    },
+    func: (overlayPayload) => {
+      const mountTarget = document.documentElement || document.body;
+      if (!mountTarget) {
+        throw new Error("页面没有可用的挂载节点。");
+      }
+
+      const previousHost = document.getElementById(overlayPayload.hostId);
+      if (previousHost) {
+        previousHost.remove();
+      }
+
+      const host = document.createElement("div");
+      host.id = overlayPayload.hostId;
+      host.style.cssText = [
+        "all: initial !important",
+        "position: fixed !important",
+        "top: 24px !important",
+        "right: 24px !important",
+        "width: 390px !important",
+        "max-width: calc(100vw - 32px) !important",
+        "z-index: 2147483647 !important",
+        "pointer-events: auto !important"
+      ].join(";");
+
+      const root = host.attachShadow ? host.attachShadow({ mode: "open" }) : host;
+      root.innerHTML = `
+        <style>
+          :host { all: initial; }
+          .card {
+            box-sizing: border-box;
+            position: relative;
+            font-family: Arial, "Microsoft YaHei", sans-serif;
+            background: #ffffff;
+            color: #111827;
+            border: 2px solid #2563eb;
+            border-radius: 12px;
+            box-shadow: 0 18px 44px rgba(15, 23, 42, 0.26);
+            padding: 16px;
+          }
+          .title {
+            margin: 0 30px 10px 0;
+            font-size: 15px;
+            line-height: 1.4;
+            font-weight: 700;
+            color: #1d4ed8;
+          }
+          .message {
+            margin: 0 0 10px;
+            padding: 8px 10px;
+            border-radius: 8px;
+            background: #eff6ff;
+            color: #1e40af;
+            font-size: 12px;
+            line-height: 1.5;
+            white-space: pre-line;
+          }
+          .rows {
+            display: grid;
+            grid-template-columns: 86px minmax(0, 1fr);
+            gap: 6px 8px;
+            margin: 0 0 10px;
+          }
+          .label {
+            color: #64748b;
+            font-size: 12px;
+            line-height: 1.45;
+          }
+          .value {
+            color: #0f172a;
+            font-size: 12px;
+            line-height: 1.45;
+            word-break: break-word;
+          }
+          .full {
+            margin: 0 0 12px;
+            padding: 9px 10px;
+            border: 1px solid #dbeafe;
+            border-radius: 8px;
+            background: #f8fafc;
+            color: #0f172a;
+            font-size: 12px;
+            line-height: 1.5;
+            word-break: break-word;
+          }
+          .actions {
+            display: flex;
+            gap: 8px;
+          }
+          button {
+            appearance: none;
+            border: 0;
+            border-radius: 8px;
+            height: 34px;
+            padding: 0 12px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 600;
+          }
+          .copy {
+            flex: 1;
+            background: #2563eb;
+            color: #ffffff;
+          }
+          .close {
+            background: #e5e7eb;
+            color: #374151;
+          }
+          .close-icon {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            width: 26px;
+            height: 26px;
+            padding: 0;
+            border-radius: 999px;
+            background: #eef2ff;
+            color: #334155;
+            font-size: 16px;
+            line-height: 26px;
+          }
+        </style>
+        <div class="card">
+          <button class="close-icon" type="button" title="关闭">×</button>
+          <div class="title"></div>
+          <div class="message"></div>
+          <div class="rows"></div>
+          <div class="full"></div>
+          <div class="actions">
+            <button class="copy" type="button">复制地址内容</button>
+            <button class="close" type="button">关闭</button>
+          </div>
+        </div>
+      `;
+
+      root.querySelector(".title").textContent = overlayPayload.title || "AddressGen 地址";
+      root.querySelector(".message").textContent = overlayPayload.message || "";
+      root.querySelector(".full").textContent = overlayPayload.fullAddress || "";
+
+      const rowsContainer = root.querySelector(".rows");
+      for (const [label, value] of overlayPayload.rows || []) {
+        const labelElement = document.createElement("div");
+        labelElement.className = "label";
+        labelElement.textContent = label;
+        const valueElement = document.createElement("div");
+        valueElement.className = "value";
+        valueElement.textContent = value;
+        rowsContainer.append(labelElement, valueElement);
+      }
+
+      const copyButton = root.querySelector(".copy");
+      const closeButtons = root.querySelectorAll(".close, .close-icon");
+      const copyText = async (value) => {
+        try {
+          await navigator.clipboard.writeText(value);
+          return true;
+        } catch (error) {
+          const textarea = document.createElement("textarea");
+          textarea.value = value;
+          textarea.setAttribute("readonly", "readonly");
+          textarea.style.cssText = "position: fixed; top: -9999px; left: -9999px;";
+          document.documentElement.appendChild(textarea);
+          textarea.select();
+          textarea.setSelectionRange(0, textarea.value.length);
+          const copied = document.execCommand("copy");
+          textarea.remove();
+          if (!copied) {
+            throw error;
+          }
+          return true;
+        }
+      };
+
+      copyButton?.addEventListener("click", async () => {
+        const originalText = copyButton.textContent;
+        copyButton.disabled = true;
+        copyButton.textContent = "复制中...";
+
+        try {
+          await copyText(overlayPayload.copyText || overlayPayload.fullAddress || "");
+          copyButton.textContent = "已复制";
+        } catch (error) {
+          copyButton.textContent = "复制失败";
+          console.error("[AddressGen浮窗] 复制失败:", error);
+        } finally {
+          window.setTimeout(() => {
+            copyButton.disabled = false;
+            copyButton.textContent = originalText;
+          }, 1200);
+        }
+      });
+
+      closeButtons.forEach((button) => {
+        button.addEventListener("click", () => {
+          host.remove();
+        });
+      });
+
+      mountTarget.appendChild(host);
+      const rect = host.getBoundingClientRect();
+
+      return {
+        ok: true,
+        mountedTo: mountTarget.tagName,
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+        hasShadowRoot: Boolean(host.shadowRoot)
+      };
+    },
+    args: [payload]
+  });
+
+  const overlayResult = results?.[0]?.result;
+  if (!overlayResult?.ok) {
+    throw new Error("地址浮窗脚本未返回成功结果。");
+  }
+
+  await appendRuntimeLog("addressgen_address_overlay_injected", {
+    tabId: tab.id,
+    windowId: tab.windowId,
+    mountedTo: overlayResult.mountedTo || "",
+    width: overlayResult.width || 0,
+    height: overlayResult.height || 0,
+    hasShadowRoot: overlayResult.hasShadowRoot === true
+  });
+
+  return overlayResult;
+}
+
+async function waitForTabComplete(tabId, timeoutMs = ADDRESSGEN_FALLBACK_TAB_TIMEOUT_MS) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const tab = await chrome.tabs.get(tabId);
+
+    if (tab.status === "complete") {
+      return tab;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+
+  throw new Error(`等待标签页加载超时（${Math.round(timeoutMs / 1000)}秒）。`);
+}
+
+async function openAddressgenFallbackTab(targetUrl) {
+  const tab = await chrome.tabs.create({
+    url: targetUrl,
+    active: false
+  });
+
+  return await waitForTabComplete(tab.id);
+}
+
+async function activateAddressgenOverlayTab(tab) {
+  if (tab?.id === undefined || tab?.id === null) {
+    throw new Error("目标标签页缺少 tabId，无法激活。");
+  }
+
+  const activatedTab = await chrome.tabs.update(tab.id, {
+    active: true
+  });
+
+  if (tab.windowId !== undefined && tab.windowId !== null) {
+    await chrome.windows.update(tab.windowId, {
+      focused: true
+    });
+  }
+
+  return activatedTab || tab;
+}
+
+async function injectAddressgenOverlayWithFallback(currentTab, payload, fallbackUrl, updatePhase = () => {}) {
+  try {
+    updatePhase("注入浮窗...");
+    const overlayResult = await injectAddressgenAddressOverlay(currentTab, payload);
+
+    return {
+      overlayResult,
+      targetTab: currentTab,
+      usedFallback: false,
+      initialError: ""
+    };
+  } catch (error) {
+    const initialError = error.message || String(error);
+    await appendRuntimeLog("addressgen_address_overlay_failed", {
+      tabId: currentTab.id,
+      windowId: currentTab.windowId,
+      url: maskSensitiveUrl(currentTab.url || ""),
+      error: initialError
+    });
+
+    updatePhase("打开MayIP页...");
+    const fallbackTab = await openAddressgenFallbackTab(fallbackUrl);
+
+    await appendRuntimeLog("addressgen_address_overlay_fallback_opened", {
+      tabId: fallbackTab.id,
+      windowId: fallbackTab.windowId,
+      url: maskSensitiveUrl(fallbackTab.url || fallbackUrl),
+      sourceError: initialError
+    });
+
+    updatePhase("新页浮窗...");
+    let overlayResult;
+    try {
+      overlayResult = await injectAddressgenAddressOverlay(fallbackTab, payload);
+    } catch (fallbackError) {
+      await appendRuntimeLog("addressgen_address_overlay_failed", {
+        tabId: fallbackTab.id,
+        windowId: fallbackTab.windowId,
+        url: maskSensitiveUrl(fallbackTab.url || fallbackUrl),
+        stage: "fallback_mayips_page",
+        sourceError: initialError,
+        error: fallbackError.message || String(fallbackError)
+      });
+      throw fallbackError;
+    }
+
+    updatePhase("显示页面...");
+    const activatedTab = await activateAddressgenOverlayTab(fallbackTab);
+
+    await appendRuntimeLog("addressgen_address_overlay_fallback_activated", {
+      tabId: activatedTab.id,
+      windowId: activatedTab.windowId,
+      url: maskSensitiveUrl(activatedTab.url || fallbackTab.url || fallbackUrl)
+    });
+
+    return {
+      overlayResult,
+      targetTab: activatedTab,
+      usedFallback: true,
+      initialError
+    };
+  }
+}
+
+async function checkAddressgenCitySupportFromMayips(updatePhase = () => {}) {
+  updatePhase("读取页面...");
+  const currentTab = await getCurrentActiveTab();
+  updatePhase("抓取IP...");
+  const mayipsResult = await captureMayipsContent();
+  const textResult = mayipsResult.textResult || {};
+  const country = String(textResult.country || "").trim().toUpperCase();
+  const city = String(textResult.city || "").trim();
+  const regionName = String(textResult.region_name || "").trim();
+
+  if (!country) {
+    throw new Error("按钮7未提取到 country，无法查询 AddressGen 城市列表。");
+  }
+
+  if (!city) {
+    throw new Error("按钮7未提取到 city，无法判断城市是否在列表中。");
+  }
+
+  await appendRuntimeLog("addressgen_city_check_started", {
+    country,
+    city,
+    regionName
+  });
+
+  try {
+    updatePhase("查询列表...");
+    const { targetUrl, areas } = await fetchAddressgenAreas(country);
+    const matchResult = matchAddressgenArea({
+      city,
+      regionName
+    }, areas);
+    const message = buildAddressgenCityCheckMessage(matchResult);
+
+    await appendRuntimeLog("addressgen_city_check_completed", {
+      targetUrl,
+      country,
+      city,
+      regionName,
+      candidateCount: areas.length,
+      methodHint: matchResult.matchBy || "not_matched",
+      matchedKeywords: [
+        matchResult.area?.area_code || "",
+        matchResult.area?.slug || "",
+        matchResult.area?.full_name || ""
+      ].filter(Boolean).join(" / "),
+      message
+    });
+
+    updatePhase("申请地址...");
+    const addressResult = await requestAddressgenAddress(country, matchResult);
+    const addressData = addressResult.data || {};
+    const address = addressData.address || {};
+    const addressSummary = formatAddressgenAddressSummary(address);
+    const addressName = formatAddressgenPersonName(addressData);
+
+    await appendRuntimeLog("addressgen_address_generated", {
+      targetUrl: addressResult.targetUrl,
+      country,
+      city,
+      regionName,
+      generatedCity: address.city || "",
+      addressState: address.state || "",
+      addressAreaCode: address.area_code || addressResult.areaCode || "",
+      addressSummary,
+      addressName,
+      personEmail: addressData.email || "",
+      addressPhone: addressData.phone || "",
+      personBirthday: addressData.birthday || "",
+      personGender: addressData.gender || "",
+      addressZip: address.zipcode || "",
+      methodHint: addressResult.mode,
+      message
+    });
+
+    const overlayPayload = buildAddressgenAddressOverlayPayload({
+      country,
+      city,
+      regionName,
+      matchResult,
+      message,
+      addressResult
+    });
+    let overlayResult = null;
+    let overlayError = "";
+    let overlayTargetTab = currentTab;
+    let usedOverlayFallback = false;
+
+    try {
+      const overlayState = await injectAddressgenOverlayWithFallback(
+        currentTab,
+        overlayPayload,
+        MAYIPS_TARGET_URL,
+        updatePhase
+      );
+      overlayResult = overlayState.overlayResult;
+      overlayTargetTab = overlayState.targetTab;
+      usedOverlayFallback = overlayState.usedFallback;
+    } catch (error) {
+      overlayError = error.message || String(error);
+      await appendRuntimeLog("addressgen_address_overlay_failed", {
+        tabId: overlayTargetTab?.id ?? currentTab.id,
+        windowId: overlayTargetTab?.windowId ?? currentTab.windowId,
+        url: maskSensitiveUrl(overlayTargetTab?.url || currentTab.url || ""),
+        error: overlayError
+      });
+    }
+
+    return {
+      country,
+      city,
+      regionName,
+      targetUrl,
+      areas,
+      matchResult,
+      addressResult,
+      addressSummary,
+      overlayResult,
+      overlayError,
+      usedOverlayFallback,
+      message: overlayError
+        ? `${message}\n地址已申请，但浮窗注入失败：${overlayError}`
+        : usedOverlayFallback
+          ? `${message}\n地址已申请；当前页无法浮窗，已打开MayIP页面显示浮窗`
+          : `${message}\n地址已申请并显示到当前页面浮窗`
+    };
+  } catch (error) {
+    await appendRuntimeLog("addressgen_city_check_failed", {
+      country,
+      city,
+      regionName,
+      error: error.message || String(error)
+    });
+    throw error;
+  }
+}
+
 function bindPopupActions() {
   saveBackendUrlButton.addEventListener("click", () => {
     void saveBackendBaseUrl();
@@ -2543,6 +4528,33 @@ function bindPopupActions() {
   featureButtons.forEach((button) => {
     button.addEventListener("click", async () => {
       const featureId = button.dataset.feature || "";
+
+      if (featureId === "8") {
+        const originalText = button.textContent;
+
+        try {
+          button.disabled = true;
+          button.textContent = "抓取IP...";
+          const result = await checkAddressgenCitySupportFromMayips((phase) => {
+            button.textContent = phase || "处理中...";
+          });
+          setSaveStatus(result.message);
+        } catch (error) {
+          setSaveStatus(error.message || "按钮8执行失败。", true);
+          if (!isRequestTimeoutError(error)) {
+            console.error(error);
+          }
+        } finally {
+          button.disabled = false;
+          button.textContent = originalText;
+        }
+
+        logEvent("feature_button_clicked", {
+          featureId,
+          popupBuild: POPUP_BUILD
+        });
+        return;
+      }
 
       if (featureId === "1") {
         const originalText = button.textContent;
@@ -2784,11 +4796,15 @@ function bindPopupActions() {
           const result = await captureChatgptAccessToken((phase) => {
             button.textContent = phase || "提取中...";
           });
+          const workspaceCount = result.workspaceResult?.workspaceCount ?? 0;
+          const workspaceSuffix = result.workspaceResult?.error
+            ? `；空间查询失败：${result.workspaceResult.error}`
+            : `；空间 ${workspaceCount} 个`;
 
           if (result.savedTo) {
-            setSaveStatus(`ChatGPT AT 已提取并保存：${result.savedTo}`);
+            setSaveStatus(`ChatGPT AT 已提取并保存：${result.savedTo}${workspaceSuffix}`, Boolean(result.workspaceResult?.error));
           } else {
-            setSaveStatus(`ChatGPT AT 已提取，浮窗已显示，但保存后端失败：${result.saveError || "未知错误"}`, true);
+            setSaveStatus(`ChatGPT AT 已提取，浮窗已显示，但保存后端失败：${result.saveError || "未知错误"}${workspaceSuffix}`, true);
           }
         } catch (error) {
           setSaveStatus(error.message || "提取网页AT失败。", true);
@@ -2914,11 +4930,12 @@ chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
   popupState.currentPageTab = tabs[0] || null;
 
   messageElement.textContent = pageInfo?.title
-    ? `当前页面：${pageInfo.title}`
-    : "已记录当前页面信息。";
+    ? `当前页面：${pageInfo.title}（${POPUP_BUILD}）`
+    : `已记录当前页面信息。（${POPUP_BUILD}）`;
 
   logEvent("popup_opened", {
     page: "popup",
+    popupBuild: POPUP_BUILD,
     currentPage: pageInfo
   });
 });
